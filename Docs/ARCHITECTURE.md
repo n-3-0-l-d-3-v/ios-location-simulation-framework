@@ -5,16 +5,17 @@
     Control / Configuration        (T12 app, CLI)
     Simulation Manager             state machine owner, wires everything
     Scenario Engine                serialisable scenarios, versioning
-    Movement Engine                fixed / random walk / walking / driving / orbit / replay
+    Movement Engine                fixed [implemented]; random walk / walking / driving / orbit / replay
     Noise / Realism Engine         seeded jitter + drift, bounded
     Geographic Engine              WGS84 geodesics, ENU            [implemented]
-    Location Abstraction           LocationProvider trait
+    Location Abstraction           LocationProvider trait          [implemented]
     Platform Adapter               C ABI + Swift → CLLocation
     Health / Recovery              metrics, watchdog, bounded retries
     Persistence / Storage          atomic writes, schema migration
 
 Cross-cutting: `domain` (canonical types) [implemented], `rng` (seeded PRNG)
-[implemented], validation pipeline.
+[implemented], `scheduler` [implemented], `validation` (first two stages
+implemented).
 
 Dependency rule: a layer may import only layers below it plus `domain`/`rng`.
 The platform adapter contains conversion and lifecycle code only.
@@ -65,6 +66,44 @@ dependency upgrade.
   impossible configurations (orbit or route playback faster than `max_speed`).
 - `Timestamp` — integer nanoseconds, so `start + n × interval` is exact.
 - `HealthState`.
+
+### `scheduler`
+- `Clock` trait with `SystemClock` (epoch captured once, advanced by a
+  monotonic timer) and `ManualClock` (tests).
+- `TickSchedule`: tick `n` is due at `start + n × interval`, recomputed from
+  the origin on every poll, so wake-up lateness never accumulates. It is a
+  pure state machine — it neither sleeps nor reads a clock; a driver polls it.
+- Backpressure: when polling falls behind, overdue slots are skipped and
+  counted (`missed`), never replayed as a burst.
+- Pause/resume shifts the origin by the paused duration: phase within the
+  interval is preserved and paused time is not counted as missed.
+
+### `validation`
+`SampleValidator` is the gate in front of emission. Implemented stages: field
+validity (`SyntheticLocation::validate`) and strictly increasing timestamps.
+Rejected samples do not advance validator state. Movement-constraint,
+metadata-consistency and scenario-boundary stages are added by T05/T07.
+
+### `movement`
+`MovementModel::sample_at(t)` returns a noise-free `MovementSample`. Only
+`FixedModel` exists. `model_for(scenario)` returns
+`MovementError::UnsupportedMode` for every other mode rather than faking one.
+
+### `provider`
+- `LocationProvider`: `start / stop / pause / resume / poll / current_location
+  / status`. Unlike the sketch in the specification, lifecycle calls take the
+  current time as an argument: providers never read a clock, which is what
+  makes runs reproducible and testable without sleeping.
+- `SimulationProvider`: per due tick, model → assemble → validate → emit.
+  Samples are stamped with the tick's ideal time, so the emitted stream does
+  not depend on poll punctuality.
+- Failure behaviour: an invalid scenario is rejected at `start` and the
+  provider stays `Idle`. If a sample cannot be produced or fails validation,
+  nothing is emitted, `failed_count` increments and the state becomes `Error`
+  (no further samples; `stop` still works). Bounded automatic recovery is the
+  health subsystem's job (T10).
+- `ModelFactory` lets another movement engine be plugged in without modifying
+  the provider.
 
 ## Platform delivery (planned, T11)
 
