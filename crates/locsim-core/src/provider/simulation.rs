@@ -3,8 +3,9 @@ use crate::domain::{
     InvalidTransition, LocationSource, Scenario, SimulationState, SyntheticLocation, Timestamp,
 };
 use crate::movement::{model_for, MovementError, MovementModel};
+use crate::noise::NoiseEngine;
 use crate::scheduler::{Poll, Tick, TickSchedule};
-use crate::validation::SampleValidator;
+use crate::validation::{SampleLimits, SampleValidator};
 
 /// Builds the movement model for a run. Replaceable so a different movement
 /// engine can be plugged in without touching the provider.
@@ -15,13 +16,14 @@ pub type ModelFactory =
 struct Run {
     schedule: TickSchedule,
     model: Box<dyn MovementModel + Send>,
+    noise: NoiseEngine,
     validator: SampleValidator,
 }
 
 /// Provider that generates samples from a [`Scenario`].
 ///
-/// Pipeline per due tick: movement model → sample assembly → validation →
-/// emit. The scenario is immutable for the provider's lifetime.
+/// Pipeline per due tick: movement model → noise → sample assembly → final
+/// validation → emit. Nothing touches a sample after validation. The scenario is immutable for the provider's lifetime.
 pub struct SimulationProvider {
     scenario: Scenario,
     model_factory: ModelFactory,
@@ -74,18 +76,18 @@ impl SimulationProvider {
     fn generate(&mut self, tick: Tick) -> Result<SyntheticLocation, ProviderError> {
         // Invariant: `run` is Some whenever state is Running; checked by caller.
         let run = self.run.as_mut().expect("run exists while running");
-        let m = run.model.sample_at(tick.target)?;
-        let sample = SyntheticLocation {
-            timestamp: tick.target,
-            coordinate: m.coordinate,
-            altitude_m: m.altitude_m,
-            horizontal_accuracy_m: self.scenario.horizontal_accuracy_m,
-            vertical_accuracy_m: self.scenario.vertical_accuracy_m,
-            speed_mps: m.speed_mps,
-            course_deg: m.course_deg,
-            source: LocationSource::Simulation,
-            simulation_state: SimulationState::Running,
-        };
+        let base = run.model.sample_at(tick.target)?;
+        let noisy = run.noise.apply(
+            tick.target,
+            &base,
+            self.scenario.horizontal_accuracy_m,
+            self.scenario.vertical_accuracy_m,
+        )?;
+        let sample = noisy.into_location(
+            tick.target,
+            LocationSource::Simulation,
+            SimulationState::Running,
+        );
         run.validator.validate(&sample)?;
         Ok(sample)
     }
@@ -108,13 +110,15 @@ impl LocationProvider for SimulationProvider {
             .validate()
             .map_err(ProviderError::InvalidScenario)?;
         let model = (self.model_factory)(&self.scenario)?;
+        let noise = NoiseEngine::for_scenario(&self.scenario)?;
         let schedule = TickSchedule::new(now, self.scenario.update_interval_s)?;
 
         self.state = SimulationState::Starting;
         self.run = Some(Run {
             schedule,
             model,
-            validator: SampleValidator::new(),
+            noise,
+            validator: SampleValidator::with_limits(SampleLimits::for_scenario(&self.scenario)),
         });
         self.last = None;
         self.sample_count = 0;

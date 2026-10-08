@@ -13,6 +13,7 @@ use crate::domain::{
     ConfigError, InvalidTransition, SimulationState, SyntheticLocation, Timestamp,
 };
 use crate::movement::MovementError;
+use crate::noise::NoiseError;
 use crate::scheduler::ScheduleError;
 use crate::validation::ValidationError;
 use std::fmt;
@@ -23,6 +24,7 @@ pub enum ProviderError {
     Transition(InvalidTransition),
     Schedule(ScheduleError),
     Movement(MovementError),
+    Noise(NoiseError),
     /// A generated sample was rejected by the validation gate.
     Validation(ValidationError),
 }
@@ -40,6 +42,7 @@ impl fmt::Display for ProviderError {
             ProviderError::Transition(e) => write!(f, "{e}"),
             ProviderError::Schedule(e) => write!(f, "scheduler: {e}"),
             ProviderError::Movement(e) => write!(f, "{e}"),
+            ProviderError::Noise(e) => write!(f, "{e}"),
             ProviderError::Validation(e) => write!(f, "{e}"),
         }
     }
@@ -62,6 +65,12 @@ impl From<ScheduleError> for ProviderError {
 impl From<MovementError> for ProviderError {
     fn from(e: MovementError) -> Self {
         ProviderError::Movement(e)
+    }
+}
+
+impl From<NoiseError> for ProviderError {
+    fn from(e: NoiseError) -> Self {
+        ProviderError::Noise(e)
     }
 }
 
