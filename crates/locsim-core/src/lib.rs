@@ -11,3 +11,4 @@ pub mod domain;
 pub mod geographic;
 pub mod rng;
 pub mod scheduler;
+pub mod validation;
