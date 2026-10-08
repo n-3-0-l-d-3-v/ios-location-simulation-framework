@@ -8,6 +8,7 @@
     Movement Engine                fixed, random walk, walking, driving, orbit, route replay [implemented]
     Route Engine                   route -> trajectory, admission  [implemented]
     Noise / Realism Engine         seeded jitter + drift, bounded  [implemented]
+    Consistency Engine             speed/course from emitted fixes [implemented]
     Geographic Engine              WGS84 geodesics, ENU            [implemented]
     Location Abstraction           LocationProvider trait          [implemented]
     Platform Adapter               C ABI + Swift → CLLocation
@@ -80,42 +81,144 @@ dependency upgrade.
 - Pause/resume shifts the origin by the paused duration: phase within the
   interval is preserved and paused time is not counted as missed.
 
+### Pipeline order
+
+    movement model          simulated time -> true position
+        |
+    noise engine            -> final emitted position (+ accuracies)
+        |                      nothing changes a position after this point
+    consistency engine      emitted position + timestamp, previous emitted fix
+        |                      -> speed, course
+    final validation gate   independent re-derivation; reject or pass
+        |
+    emit
+
+The **emitted position and its timestamp are the authoritative observation**.
+Speed and course are derived from them; the movement model's own speed and
+course and the noise engine's noisy copies of them never reach the output.
+
+### `consistency`
+Makes the reported kinematics describe the emitted trajectory.
+
+**Scheme.** One finite difference everywhere: the backward difference over the
+interval ending at the sample, using the geodesic inverse.
+
+| Quantity | Definition |
+|---|---|
+| speed | geodesic distance(previous emitted fix, this fix) / (this timestamp - previous timestamp) |
+| course | bearing, at this fix, of the geodesic from the previous emitted fix (direction of travel on arrival) |
+
+It is causal (a central difference would delay every sample by one interval),
+has no free parameter, and uses the provider's actual timestamps: no sampling
+rate is assumed. Speed is therefore the *mean ground speed over the interval*,
+not an instantaneous value; the same trajectory sampled at different rates
+reports different interval means (an orbit reports `2 r sin(w dt/2)/dt`).
+Timestamps are strictly increasing integer nanoseconds, so the divisor is never
+zero.
+
+**First sample.** No predecessor: speed and course are `None`, not zero.
+
+**Stationary semantics**, two fixed thresholds on the displacement `d`:
+
+| Displacement | Speed | Course |
+|---|---|---|
+| `d < 4 nm` (`STATIONARY_DISPLACEMENT_M`, twice coordinate resolution) | exactly 0 | none |
+| `4 nm <= d < 0.1 mm` (`MIN_COURSE_DISPLACEMENT_M`) | `d / dt` | none: the direction of so short a line is mostly rounding (0.0023 deg at the threshold, growing as `1/d`) |
+| `d >= 0.1 mm` | `d / dt` | geodesic arrival bearing |
+
+A course is never carried over from an earlier sample; after a pause the first
+course is the new direction of travel.
+
+**Resolution.** A coordinate is stored to about 2 nm
+(`geographic::COORDINATE_RESOLUTION_M`), so a distance between two fixes is
+uncertain by up to 4 nm. Derived speed has a resolution of `4 nm / dt` (4e-9
+m/s at 1 Hz, 4e-6 m/s at 1 kHz, 4 mm/s at 1 MHz) and derived course of
+`4 nm / d` radians. These are properties of the observation; the gate adds
+exactly these amounts where it compares derived quantities with physical
+limits.
+
+**Noise.** Position noise is applied before derivation, so speed and course
+include it: a fixed position with jitter reports the speed and direction of
+the jitter, because that is what the emitted fix is doing. `speed_noise_mps`
+and `heading_noise_deg` are an observation model on top:
+`reported = derived + n`, with `n` clipped at 3 sigma. The contract is then
+`|reported - derived| <= 3 sigma`. A stationary sample gets no speed noise and
+a sample without a course gets no heading noise.
+
+**Accuracy.** Not kinematic and not derived. Reported horizontal and vertical
+accuracy are the scenario's configured values plus the noise engine's clipped
+accuracy noise, nothing else; the consistency check rejects anything outside
+that band. Accuracy is never widened to cover a disagreement between position
+and speed. There is no model here from which a statistically meaningful
+accuracy could be derived, so none is invented.
+
+**`KinematicsDeriver`.** State is one previous fix (timestamp and coordinate).
+`derive` is pure: one geodesic inverse, no allocation. `accept` is called by
+the provider only after a sample has passed the gate, so a rejected sample
+never becomes the reference. Nothing else is cached, so nothing can go stale.
+
+**Independent check.** `check_first` / `check_pair` recompute the expected
+values from two samples and reject wrong, missing or non-finite speed; wrong,
+stale or missing course; a course without movement; speed on a stationary fix;
+kinematics on a first sample; a timestamp that does not match the reported
+speed; accuracy outside its band. It trusts no stored result of the deriver.
+
+Cost, release build, per sample: derivation about 270 ns of a 1.2 us pipeline
+(23 %); the gate, which recomputes the same geodesic on purpose, about 310 ns.
+
 ### `validation`
 `SampleValidator` is the last step before emission; nothing modifies a sample
-after it. It shares no state with the movement or noise engines and recomputes
-every quantity from the emitted samples with exact geodesics, so it catches
-their bugs too.
+after it. It shares no state with the movement, noise or consistency engines
+and recomputes every quantity from the emitted samples with exact geodesics.
 
 | Stage | Rejects |
 |---|---|
 | Field validity | NaN/infinite values, out-of-range coordinates, negative accuracy or speed, course outside `[0, 360)`, course without motion |
 | Timestamp | not strictly after the previous accepted sample |
-| Speed | reported speed above `max_speed` |
-| Boundary | position outside `movement.radius_m` of the origin (not in circular mode, where the radius is the orbit) |
-| Displacement | moved more than `(effective max speed + noise.max_offset_rate) × dt` — teleportation |
-| Acceleration | speed rose by more than `max_acceleration × dt` |
-| Deceleration | speed fell by more than `max_deceleration × dt` |
-| Heading rate | course turned by more than `max_heading_rate × dt` |
+| Boundary | position outside `movement.radius_m` of the origin (not in circular mode) |
+| Displacement | moved more than `(effective max speed + noise.max_offset_rate) x dt` — teleportation |
+| Consistency | speed or course that contradict the positions and timestamps (see above) |
+| Speed | reported speed above `effective max speed + noise.max_offset_rate` (+ 3 sigma of speed noise) |
+| Acceleration / deceleration | interval-mean speed changed by more than the limit allows |
+| Heading rate | chord direction turned by more than the limit allows |
 
-Comparisons are strict; there is no numerical tolerance. The only allowances
-are physical and come from configured noise: speed and heading noise are
-clipped at ±3 σ, so two readings may differ by 6 σ beyond the true change; and
-position noise of reach `m` can alter the convergence between two fixes by up
-to `2·m·tan(lat)/R` (unbounded at a pole, where the heading check is skipped).
-Rejected samples do not advance validator state.
+The kinematic stages are stated for what speed and course are — an interval
+mean and a chord direction. With `dt` the interval ending at the sample and
+`dt'` the one before:
 
-**Turning is measured on the surface.** A straight path changes bearing as it
-goes — tens of degrees per kilometre near a pole — so the previous course is
-first carried along the geodesic to the new fix (`Geodesic::convergence_deg`
-is added) and only the remainder counts as a turn. `convergence_deg` uses a
-half-angle formula because subtracting the two bearings of a very short line
-is ill-conditioned (each is only good to ~1e-3° for a 0.1 mm line near a pole;
-the convergence is good to 1e-9°).
+- Two consecutive interval means of a speed whose rate of change is at most `a`
+  differ by at most `a (dt + dt')/2`, the time between the interval midpoints.
+  For evenly spaced samples that is `a dt`; for uneven ones `a dt` would be
+  wrong in both directions.
+- A chord's direction lies within the directions travelled during its
+  interval, so consecutive chords differ by at most the turning possible over
+  both intervals, `w (dt + dt')`. (For even sampling this bound is up to twice
+  the old `w dt`; the tighter `w (dt + dt')/2` holds only at constant speed.)
+
+Comparisons are strict. Every amount added to a limit is physical or a stated
+resolution, derived from configuration:
+
+| Allowance | Amount | Why |
+|---|---|---|
+| Chord shortfall | `v_max (1 - cos(w dt / 2))` on speed change | a path that turns within an interval has a shorter chord without braking |
+| Position noise | `2 r` on speed change; `asin(r dt / (d - r dt))` per chord on heading, unbounded once the noise step is half the chord | noise moving at up to `r` shifts each end of a chord |
+| Observation noise | `6 sigma` between two readings | each is within 3 sigma of the derived value |
+| Coordinate resolution | `4 nm / dt` per speed, `4 nm / d` rad per course | fixes are stored to ~2 nm |
+
+A fix that position noise had to hold at the scenario fence has a noise step
+that is not bounded by `r dt` (see `noise`); the speed-change and heading
+stages are skipped for the two comparisons it takes part in.
+
+**Turning is measured on the surface.** The previous course is carried along
+the geodesic to the new fix (`Geodesic::convergence_deg` added) and only the
+remainder counts as a turn, so straight travel near a pole is not mistaken for
+turning.
 
 Mutation evidence that the gate is independent: with the noise engine's limits
-loosened, and separately with the steered model's acceleration limit, turn cap,
-fence or convergence handling broken, the pipeline tests fail because the gate
-rejects the stream.
+loosened; with the steered model's acceleration limit, turn cap, fence or
+convergence handling broken; with route peaks under-reported; and with the
+deriver reporting 0.1 % too much speed, the departure bearing, or a carried-over
+course — the pipeline tests fail because the gate rejects the stream.
 
 ### `movement`
 `MovementModel::sample_at(t)` maps *simulated* time to a noise-free
@@ -332,6 +435,10 @@ Model (noise = measurement error on top of the true motion):
   never changes another's sequence. Same `(parameters, constraints, seed,
   inputs)` ⇒ bit-identical output; `reset()` replays.
 
+Since T07 the engine's own noisy speed and course are not emitted; its speed
+and heading draws are passed on as observation noise on the kinematics derived
+from the emitted positions.
+
 Hard guarantees, each verified with exact geodesic distances before a
 position is returned:
 1. offset from the true position ≤ `max_position_offset_m`;
@@ -339,9 +446,17 @@ position is returned:
    `max_offset_rate_mps × dt`;
 3. inside the scenario boundary (`movement.radius_m` around the origin).
 
+Beyond these the offset itself is slew-limited: it changes by at most
+`max_offset_rate_mps x dt` between samples, so the emitted track keeps the
+direction and speed of the true one to within the noise step. (Until T07 only
+the emitted step was limited, which let the offset swing by twice the true
+displacement and the emitted track double back on a mover going straight.)
+Only the boundary overrides the slew limit: an output that would leave the
+fence is pulled back onto it however far the offset must change.
+
 How they are met: the candidate is projected exactly onto the intersection of
-the offset and step discs in a local tangent plane (re-anchored every 1 km),
-then pulled inside the boundary along a geodesic. If the exact check still
+the offset disc and the slew disc in a local tangent plane (re-anchored every
+1 km), then pulled inside the boundary along a geodesic. If the exact check still
 fails, fallbacks are tried in order — a point on the geodesic from the previous
 output to the true position (feasible by the triangle inequality), holding the
 previous output, the true position — and if none passes the engine returns
@@ -371,7 +486,8 @@ Design decisions worth knowing:
   / status`. Unlike the sketch in the specification, lifecycle calls take the
   current time as an argument: providers never read a clock, which is what
   makes runs reproducible and testable without sleeping.
-- `SimulationProvider`: per due tick, model → assemble → validate → emit.
+- `SimulationProvider`: per due tick, model → noise → derive speed and course
+  from emitted positions → validate → emit (see "Pipeline order").
   Models are sampled at *simulated* time `start + tick index × interval`,
   which stands still while paused, so a mover resumes where it was instead
   of leaping ahead; samples are stamped with wall time.
