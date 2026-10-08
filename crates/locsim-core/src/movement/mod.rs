@@ -11,6 +11,7 @@
 //! |---|---|---|
 //! | Fixed | [`FixedModel`] | stationary |
 //! | Circular | [`CircularModel`] | closed form in time, no accumulated state |
+//! | RandomWalk, Walking, Driving | [`SteeredModel`] | integrated speed/heading with limits |
 //! | RouteReplay | — | not implemented (T06), reported as unsupported |
 //!
 //! All geometry uses the `geographic` primitives (geodesic direct/inverse);
@@ -18,9 +19,11 @@
 
 mod circular;
 mod fixed;
+mod steered;
 
 pub use circular::CircularModel;
 pub use fixed::FixedModel;
+pub use steered::{Cruise, SteeredConfig, SteeredModel};
 
 use crate::domain::{Coordinate, MovementMode, Scenario, Timestamp};
 use crate::geographic::GeoError;
@@ -120,6 +123,9 @@ pub fn model_for(scenario: &Scenario) -> Result<Box<dyn MovementModel + Send>, M
             scenario.altitude_m,
         ))),
         MovementMode::Circular => Ok(Box::new(CircularModel::for_scenario(scenario)?)),
-        other => Err(MovementError::UnsupportedMode(other)),
+        MovementMode::RandomWalk | MovementMode::Walking | MovementMode::Driving => {
+            Ok(Box::new(SteeredModel::for_scenario(scenario)?))
+        }
+        MovementMode::RouteReplay => Err(MovementError::UnsupportedMode(scenario.mode)),
     }
 }
