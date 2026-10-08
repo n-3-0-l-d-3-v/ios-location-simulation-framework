@@ -21,7 +21,9 @@ impl Enu {
     }
 }
 
-fn geodetic_to_ecef(coord: Coordinate, altitude_m: f64) -> [f64; 3] {
+/// Earth-centred, Earth-fixed Cartesian position (metres) of a geodetic
+/// point at `altitude_m` above the ellipsoid.
+pub fn geodetic_to_ecef(coord: Coordinate, altitude_m: f64) -> [f64; 3] {
     let (sp, cp) = coord.latitude().to_radians().sin_cos();
     let (sl, cl) = coord.longitude().to_radians().sin_cos();
     let n = A / (1.0 - E2 * sp * sp).sqrt();
@@ -32,7 +34,9 @@ fn geodetic_to_ecef(coord: Coordinate, altitude_m: f64) -> [f64; 3] {
     ]
 }
 
-fn ecef_to_geodetic(p: [f64; 3]) -> Result<(Coordinate, f64), GeoError> {
+/// Inverse of [`geodetic_to_ecef`]: the geodetic point beneath (or above)
+/// an ECEF position, and its height over the ellipsoid.
+pub fn ecef_to_geodetic(p: [f64; 3]) -> Result<(Coordinate, f64), GeoError> {
     let [x, y, z] = p;
     let rho = x.hypot(y);
     if rho < 1e-6 {
@@ -66,6 +70,26 @@ fn ecef_to_geodetic(p: [f64; 3]) -> Result<(Coordinate, f64), GeoError> {
     }
     let coord = Coordinate::new(lat.to_degrees().clamp(-90.0, 90.0), lon.to_degrees())?;
     Ok((coord, alt))
+}
+
+/// Unit vectors, in ECEF, pointing east, north and up at a point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LocalAxes {
+    pub east: [f64; 3],
+    pub north: [f64; 3],
+    pub up: [f64; 3],
+}
+
+/// The local east/north/up directions at `coord`. At a pole east and north
+/// follow the coordinate's stated longitude.
+pub fn local_axes(coord: Coordinate) -> LocalAxes {
+    let (sin_lat, cos_lat) = coord.latitude().to_radians().sin_cos();
+    let (sin_lon, cos_lon) = coord.longitude().to_radians().sin_cos();
+    LocalAxes {
+        east: [-sin_lon, cos_lon, 0.0],
+        north: [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat],
+        up: [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat],
+    }
 }
 
 /// An ENU frame anchored at a geodetic origin.
@@ -224,6 +248,50 @@ mod tests {
             .unwrap();
         assert_eq!(p.latitude(), 90.0);
         assert!((alt - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ecef_round_trip_and_local_axes() {
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        for (lat, lon, alt) in [
+            (12.9352, 77.6245, 920.0),
+            (-45.0, 179.9, 0.0),
+            (89.999, -30.0, -50.0),
+            (0.0, 0.0, 0.0),
+        ] {
+            let p = c(lat, lon);
+            let x = geodetic_to_ecef(p, alt);
+            let (back, height) = ecef_to_geodetic(x).unwrap();
+            assert!((back.latitude() - lat).abs() < 1e-10 && (back.longitude() - lon).abs() < 1e-9);
+            assert!((height - alt).abs() < 1e-6);
+
+            // Orthonormal, and consistent with the ENU frame at that point.
+            let axes = local_axes(p);
+            for (u, v) in [
+                (axes.east, axes.north),
+                (axes.east, axes.up),
+                (axes.north, axes.up),
+            ] {
+                assert!(dot(u, v).abs() < 1e-15);
+            }
+            for u in [axes.east, axes.north, axes.up] {
+                assert!((dot(u, u) - 1.0).abs() < 1e-15);
+            }
+            // One metre up really is one metre of altitude.
+            let above = [x[0] + axes.up[0], x[1] + axes.up[1], x[2] + axes.up[2]];
+            assert!((ecef_to_geodetic(above).unwrap().1 - alt - 1.0).abs() < 1e-6);
+            // One metre north raises the latitude and keeps the longitude.
+            let north = [
+                x[0] + axes.north[0],
+                x[1] + axes.north[1],
+                x[2] + axes.north[2],
+            ];
+            let (moved, _) = ecef_to_geodetic(north).unwrap();
+            assert!(moved.latitude() > lat);
+            if lat.abs() < 89.0 {
+                assert!((moved.longitude() - lon).abs() < 1e-9);
+            }
+        }
     }
 
     #[test]

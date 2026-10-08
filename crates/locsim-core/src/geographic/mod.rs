@@ -11,7 +11,7 @@ pub mod wgs84;
 pub use coordinate::{
     bearing_difference, normalize_bearing, normalize_longitude, Coordinate, CoordinateError,
 };
-pub use enu::{Enu, EnuFrame};
+pub use enu::{ecef_to_geodetic, geodetic_to_ecef, local_axes, Enu, EnuFrame, LocalAxes};
 pub use geodesic::{
     bearing, destination, direct, distance, interpolate, inverse, velocity_between, within_radius,
     Geodesic, MAX_GEODESIC_DISTANCE_M,
