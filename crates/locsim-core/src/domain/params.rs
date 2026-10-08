@@ -322,17 +322,27 @@ pub struct NoiseParameters {
     pub position_noise_m: f64,
     /// Hard bound on total position offset (jitter + drift) from the true point.
     pub max_position_offset_m: f64,
+    /// Observation noise on the reported speed: added to the speed derived
+    /// from the emitted positions, clipped at ±3 σ. Not applied to a
+    /// stationary sample.
     pub speed_noise_mps: f64,
+    /// Observation noise on the reported course: added to the course derived
+    /// from the emitted positions, clipped at ±3 σ.
     pub heading_noise_deg: f64,
+    /// Noise on the reported accuracies around their configured values,
+    /// clipped at ±3 σ. Accuracy is never derived from anything else.
     pub accuracy_noise_m: f64,
     /// Low-frequency drift speed (metres per second).
     pub drift_rate_mps: f64,
     /// Correlation time of the jitter and of the speed/heading/accuracy
     /// noise (first-order Gauss–Markov). 0 = uncorrelated from sample to sample.
     pub position_correlation_time_s: f64,
-    /// Hard limit on how fast the position offset may change (m/s). The
-    /// noisy output can therefore never move more than
-    /// `true displacement + max_offset_rate_mps × dt` between two samples.
+    /// Hard limit on how fast the position offset may change (m/s): the
+    /// offset moves by at most this times `dt` between two samples, so the
+    /// noisy output never moves more than
+    /// `true displacement + max_offset_rate_mps × dt`. The one exception is
+    /// an output that would leave the scenario boundary: it is pulled back
+    /// onto the boundary however far the offset must change.
     pub max_offset_rate_mps: f64,
 }
 

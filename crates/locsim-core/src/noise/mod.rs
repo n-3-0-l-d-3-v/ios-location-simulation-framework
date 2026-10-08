@@ -27,7 +27,15 @@
 //!    `max_offset_rate_mps × dt`;
 //! 3. inside the scenario boundary, if there is one.
 //!
-//! The candidate is first shaped by projections onto those three sets. If the
+//! Beyond those, the offset itself is slew-limited: between two samples it
+//! changes by at most `max_offset_rate_mps × dt`, so the emitted track keeps
+//! the direction and speed of the true one to within the noise step. Only
+//! the boundary overrides this — an output that would leave the fence is
+//! pulled back onto it, however far the offset has to change — which is why
+//! the validation gate treats a fix held at the fence as having an
+//! unbounded noise step.
+//!
+//! The candidate is first shaped by projections onto those sets. If the
 //! result still fails the exact check (curvature, rounding, or limits below
 //! the numerical resolution), fallbacks are tried in order: a point on the
 //! geodesic from the previous output towards the true position (which
@@ -36,8 +44,8 @@
 //! engine returns an error instead of a position. With all components
 //! disabled the engine is an exact identity.
 
+use crate::domain::NOISE_CLIP_SIGMA;
 use crate::domain::{Boundary, ConfigError, Coordinate, NoiseParameters, Scenario, Timestamp};
-use crate::domain::{SyntheticLocation, NOISE_CLIP_SIGMA};
 use crate::geographic::{self, normalize_bearing, EnuFrame, GeoError};
 use crate::movement::MovementSample;
 use crate::rng::Rng;
@@ -146,6 +154,10 @@ pub struct NoisySample {
     pub vertical_accuracy_m: f64,
     /// Geodesic distance between the true and the reported position.
     pub position_offset_m: f64,
+    /// This sample's draw of speed observation noise, clipped at ±3 σ.
+    pub speed_noise_mps: f64,
+    /// This sample's draw of heading observation noise, clipped at ±3 σ.
+    pub heading_noise_deg: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -505,6 +517,8 @@ impl NoiseEngine {
             horizontal_accuracy_m: horizontal_accuracy_m + self.horizontal_accuracy.next(rho),
             vertical_accuracy_m: vertical_accuracy_m + self.vertical_accuracy.next(rho),
             position_offset_m,
+            speed_noise_mps: speed_noise,
+            heading_noise_deg: heading_noise,
         };
         self.previous = Some(Previous {
             t,
@@ -583,9 +597,21 @@ impl NoiseEngine {
         };
 
         let p = to_plane(base)?;
-        let step_plane = match step {
-            Some(s) => Some((to_plane(s.from)?, tighten(s.max_m))),
-            None => None,
+        // Where the output would be if the offset did not change at all, and
+        // how far from there it may go: the offset itself is slew-limited to
+        // `max_offset_rate × dt`. (Limiting only the output's step would let
+        // the offset swing by up to twice the true displacement, so that the
+        // emitted track could double back on a mover going straight ahead.)
+        let step_plane = match (self.previous, dt) {
+            (Some(prev), Some(dt)) => {
+                let (was_out, was_base) = (to_plane(prev.out)?, to_plane(prev.base)?);
+                let carried = V2 {
+                    e: p.e + (was_out.e - was_base.e),
+                    n: p.n + (was_out.n - was_base.n),
+                };
+                Some((carried, tighten(self.params.max_offset_rate_mps * dt)))
+            }
+            _ => None,
         };
         let mut q = V2 {
             e: p.e + offset.e,
@@ -651,28 +677,6 @@ impl NoiseEngine {
             }
         }
         Err(NoiseError::ConstraintUnsatisfiable)
-    }
-}
-
-impl NoisySample {
-    /// Assembles the emit-ready sample. Final validation happens after this.
-    pub fn into_location(
-        self,
-        timestamp: Timestamp,
-        source: crate::domain::LocationSource,
-        simulation_state: crate::domain::SimulationState,
-    ) -> SyntheticLocation {
-        SyntheticLocation {
-            timestamp,
-            coordinate: self.coordinate,
-            altitude_m: self.altitude_m,
-            horizontal_accuracy_m: self.horizontal_accuracy_m,
-            vertical_accuracy_m: self.vertical_accuracy_m,
-            speed_mps: self.speed_mps,
-            course_deg: self.course_deg,
-            source,
-            simulation_state,
-        }
     }
 }
 
@@ -796,6 +800,47 @@ mod tests {
             prev = Some(s.coordinate);
         }
         assert!(moved);
+    }
+
+    #[test]
+    fn the_offset_itself_changes_no_faster_than_its_rate() {
+        // A mover going straight at 6 m/s with 2 m of jitter that may slew
+        // at only 0.3 m/s: the emitted fix must stay beside the true one,
+        // not swing around it.
+        let p = NoiseParameters {
+            max_offset_rate_mps: 0.3,
+            position_correlation_time_s: 0.0,
+            ..jitter()
+        };
+        let mut e = NoiseEngine::new(p, free(10.0), 21).unwrap();
+        let offset = |base: Coordinate, out: Coordinate| {
+            let enu = EnuFrame::new(base, 0.0).unwrap().to_enu(out, 0.0).unwrap();
+            (enu.east, enu.north)
+        };
+        let mut previous: Option<(f64, f64)> = None;
+        let (mut fastest, mut backwards) = (0.0f64, 0);
+        let mut last_out: Option<Coordinate> = None;
+        for n in 0..3_000 {
+            let base = geographic::destination(origin(), 90.0, 6.0 * n as f64).unwrap();
+            let s = e.apply(t(n), &moving(base, 6.0, 90.0), 5.0, 8.0).unwrap();
+            let now = offset(base, s.coordinate);
+            if let Some(before) = previous {
+                fastest = fastest.max((now.0 - before.0).hypot(now.1 - before.1));
+            }
+            if let Some(out) = last_out {
+                // The emitted track always advances eastwards too.
+                let bearing = geographic::bearing(out, s.coordinate).unwrap();
+                backwards += (geographic::bearing_difference(90.0, bearing).abs() > 90.0) as u32;
+            }
+            previous = Some(now);
+            last_out = Some(s.coordinate);
+        }
+        assert!(
+            fastest <= 0.3 + 1e-6,
+            "offset moved {fastest} m in a second"
+        );
+        assert!(fastest > 0.29, "limit never reached: {fastest}");
+        assert_eq!(backwards, 0);
     }
 
     #[test]

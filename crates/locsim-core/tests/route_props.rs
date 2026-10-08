@@ -8,6 +8,7 @@
 mod common;
 
 use common::*;
+use locsim_core::consistency::{ConsistencyTolerance, KinematicsDeriver, ObservationNoise};
 use locsim_core::domain::{
     Boundary, LocationSource, PlaybackParameters, Route, SimulationState, SyntheticLocation,
     Timestamp,
@@ -52,30 +53,38 @@ fn random_plan(rng: &mut Rng, case: u64) -> (Route, PlaybackParameters, RoutePla
     (route, playback, plan)
 }
 
-/// The gate's limits for a route admitted under `limits`, with no noise.
+/// The gate's limits for a route admitted under `limits`, with no noise,
+/// including the metadata-consistency stage.
 fn gate_limits(limits: &RouteLimits) -> SampleLimits {
     SampleLimits {
         max_speed_mps: limits.max_speed_mps,
-        max_displacement_rate_mps: limits.max_speed_mps,
+        position_noise_rate_mps: 0.0,
         boundary: limits.boundary,
         max_acceleration_mps2: limits.max_acceleration_mps2,
         max_deceleration_mps2: limits.max_deceleration_mps2,
         max_heading_rate_dps: limits.max_heading_rate_dps,
-        speed_noise_allowance_mps: 0.0,
-        heading_noise_allowance_deg: 0.0,
-        position_noise_reach_m: 0.0,
+        speed_noise_reach_mps: 0.0,
+        heading_noise_reach_deg: 0.0,
+        consistency: Some(ConsistencyTolerance::EXACT),
     }
 }
 
-fn as_sample(state: &RouteState, t_ns: i64) -> SyntheticLocation {
+/// The sample the pipeline would emit for this route state: its position,
+/// with speed and course derived from the emitted positions.
+fn as_sample(deriver: &mut KinematicsDeriver, state: &RouteState, t_ns: i64) -> SyntheticLocation {
+    let timestamp = Timestamp::from_nanos(START + t_ns);
+    let k = deriver
+        .derive(timestamp, state.coordinate, ObservationNoise::NONE)
+        .unwrap();
+    deriver.accept(timestamp, state.coordinate);
     SyntheticLocation {
-        timestamp: Timestamp::from_nanos(START + t_ns),
+        timestamp,
         coordinate: state.coordinate,
         altitude_m: state.altitude_m,
         horizontal_accuracy_m: 5.0,
         vertical_accuracy_m: 8.0,
-        speed_mps: Some(state.speed_mps),
-        course_deg: state.course_deg,
+        speed_mps: k.speed_mps,
+        course_deg: k.course_deg,
         source: LocationSource::Replay,
         simulation_state: SimulationState::Running,
     }
@@ -181,12 +190,13 @@ fn admitted_routes_pass_the_gate_at_any_sampling_interval() {
             };
             assert_eq!(plan.violations(&limits), vec![], "case {case}");
             let mut gate = SampleValidator::with_limits(gate_limits(&limits));
+            let mut deriver = KinematicsDeriver::new();
             let mut t = 0i64;
             let end = plan.duration_ns() + 3 * SEC;
             let mut count = 0u64;
             while t <= end && count < 4_000 {
                 let state = plan.state_at(t).unwrap();
-                if let Err(e) = gate.validate(&as_sample(&state, t)) {
+                if let Err(e) = gate.validate(&as_sample(&mut deriver, &state, t)) {
                     panic!(
                         "case {case} cadence {cadence} (step {step_s} s) at {t} ns: {e}\n{state:?}"
                     );
@@ -387,13 +397,14 @@ fn antimeridian_and_polar_routes_are_smooth() {
         let limits = declared_limits(&plan, route.points()[0].coordinate, TIGHT, 0.02).unwrap();
         assert_eq!(plan.violations(&limits), vec![], "{label}");
         let mut gate = SampleValidator::with_limits(gate_limits(&limits));
+        let mut deriver = KinematicsDeriver::new();
         let mut previous: Option<RouteState> = None;
         let mut signs = [false, false];
         let mut swing = 0.0;
         for step in 0..=(plan.duration_ns() / (20 * 1_000_000)) {
             let t = step * 20 * 1_000_000;
             let s = plan.state_at(t).unwrap();
-            gate.validate(&as_sample(&s, t))
+            gate.validate(&as_sample(&mut deriver, &s, t))
                 .unwrap_or_else(|e| panic!("{label} at {t}: {e}"));
             signs[(s.coordinate.longitude() < 0.0) as usize] = true;
             if let Some(p) = previous {

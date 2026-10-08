@@ -1,4 +1,5 @@
 use super::{LocationProvider, ProviderError, ProviderStatus};
+use crate::consistency::{KinematicsDeriver, ObservationNoise};
 use crate::domain::{
     InvalidTransition, LocationSource, Scenario, SimulationState, SyntheticLocation, Timestamp,
 };
@@ -19,13 +20,16 @@ struct Run {
     schedule: TickSchedule,
     model: Box<dyn MovementModel + Send>,
     noise: NoiseEngine,
+    deriver: KinematicsDeriver,
     validator: SampleValidator,
 }
 
 /// Provider that generates samples from a [`Scenario`].
 ///
-/// Pipeline per due tick: movement model → noise → sample assembly → final
-/// validation → emit. Nothing touches a sample after validation. The scenario is immutable for the provider's lifetime.
+/// Pipeline per due tick: movement model → noise → final position →
+/// derive speed and course from emitted positions → final validation →
+/// emit. Nothing touches a sample after validation, and nothing touches a
+/// position after noise. The scenario is immutable for the provider's lifetime.
 pub struct SimulationProvider {
     scenario: Scenario,
     model_factory: ModelFactory,
@@ -93,12 +97,31 @@ impl SimulationProvider {
             self.scenario.horizontal_accuracy_m,
             self.scenario.vertical_accuracy_m,
         )?;
-        let sample = noisy.into_location(
+        // From here on the position is final. Speed and course are derived
+        // from it and the previously emitted fix; the model's own speed and
+        // course never reach the output.
+        let kinematics = run.deriver.derive(
             tick.target,
-            LocationSource::Simulation,
-            SimulationState::Running,
-        );
+            noisy.coordinate,
+            ObservationNoise {
+                speed_mps: noisy.speed_noise_mps,
+                heading_deg: noisy.heading_noise_deg,
+            },
+        )?;
+        let sample = SyntheticLocation {
+            timestamp: tick.target,
+            coordinate: noisy.coordinate,
+            altitude_m: noisy.altitude_m,
+            horizontal_accuracy_m: noisy.horizontal_accuracy_m,
+            vertical_accuracy_m: noisy.vertical_accuracy_m,
+            speed_mps: kinematics.speed_mps,
+            course_deg: kinematics.course_deg,
+            source: LocationSource::Simulation,
+            simulation_state: SimulationState::Running,
+        };
         run.validator.validate(&sample)?;
+        // Only an emitted fix becomes the reference for the next one.
+        run.deriver.accept(sample.timestamp, sample.coordinate);
         Ok(sample)
     }
 
@@ -129,6 +152,7 @@ impl LocationProvider for SimulationProvider {
             schedule,
             model,
             noise,
+            deriver: KinematicsDeriver::new(),
             validator: SampleValidator::with_limits(SampleLimits::for_scenario(&self.scenario)),
         });
         self.last = None;
@@ -292,7 +316,10 @@ mod tests {
             assert_eq!(s.coordinate, fixed_scenario().origin);
             assert_eq!(s.altitude_m, 920.0);
             assert_eq!((s.horizontal_accuracy_m, s.vertical_accuracy_m), (5.0, 8.0));
-            assert_eq!((s.speed_mps, s.course_deg), (Some(0.0), None));
+            // The first fix has no predecessor; after that the position
+            // demonstrably does not move.
+            let expected = if n == 0 { None } else { Some(0.0) };
+            assert_eq!((s.speed_mps, s.course_deg), (expected, None));
             assert_eq!(s.source, LocationSource::Simulation);
             assert_eq!(s.simulation_state, SimulationState::Running);
             assert_eq!(s.validate(), Ok(()));
@@ -420,11 +447,13 @@ mod tests {
         p.start(t(T0)).unwrap();
         let first = p.poll(t(T0)).unwrap().unwrap();
         assert_eq!(first.coordinate, Coordinate::new(0.0, 0.0).unwrap());
-        assert_eq!((first.speed_mps, first.course_deg), (Some(0.0), None));
+        assert_eq!((first.speed_mps, first.course_deg), (None, None));
         assert!(!p.status().trajectory_complete);
 
+        // Half-way after 5 s: 5.57 m covered, so 1.11 m/s over that interval.
         let mid = p.poll(t(T0 + 5 * SEC)).unwrap().unwrap();
         assert!((mid.coordinate.longitude() - 0.00005).abs() < 1e-9);
+        assert!((mid.speed_mps.unwrap() - 1.11319).abs() < 1e-4);
         assert!((mid.course_deg.unwrap() - 90.0).abs() < 1e-6);
         assert!(!p.status().trajectory_complete);
 
@@ -432,8 +461,14 @@ mod tests {
         for n in 10..15 {
             let s = p.poll(t(T0 + n * SEC)).unwrap().unwrap();
             assert_eq!(s.coordinate, end);
-            assert_eq!((s.speed_mps, s.course_deg), (Some(0.0), None));
             assert!(p.status().trajectory_complete);
+            if n == 10 {
+                // Arriving: the second half was covered since the last fix.
+                assert!((s.speed_mps.unwrap() - 1.11319).abs() < 1e-4);
+                assert!((s.course_deg.unwrap() - 90.0).abs() < 1e-6);
+            } else {
+                assert_eq!((s.speed_mps, s.course_deg), (Some(0.0), None));
+            }
         }
         // Completion is not a stop: the provider is still running.
         assert_eq!(p.status().state, SimulationState::Running);
@@ -488,7 +523,15 @@ mod tests {
             let s = p.poll(t(T0 + n * SEC)).unwrap().unwrap();
             let d = crate::geographic::distance(origin, s.coordinate).unwrap();
             assert!((d - 50.0).abs() < 1e-6);
-            assert!(s.speed_mps.unwrap() > 1.7 && s.course_deg.is_some());
+            if n == 0 {
+                assert_eq!((s.speed_mps, s.course_deg), (None, None));
+            } else {
+                // 2°/s on a 50 m circle: 1.745 m/s along the arc, a hair
+                // less along the chord the two fixes actually span.
+                let speed = s.speed_mps.unwrap();
+                assert!(speed > 1.7 && speed < 1.7454, "{speed}");
+                assert!(s.course_deg.is_some());
+            }
         }
         assert_eq!(p.status().failed_count, 0);
     }

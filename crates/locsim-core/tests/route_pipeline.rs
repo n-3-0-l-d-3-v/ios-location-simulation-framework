@@ -9,11 +9,12 @@
 mod common;
 
 use common::*;
+use locsim_core::consistency::{KinematicsDeriver, ObservationNoise};
 use locsim_core::domain::{
     Coordinate, LocationSource, NoiseParameters, PlaybackParameters, Route, Scenario,
-    SimulationState, SyntheticLocation, Timestamp, NOISE_CLIP_SIGMA,
+    SimulationState, SyntheticLocation, Timestamp,
 };
-use locsim_core::geographic::{bearing_difference, destination, distance, inverse};
+use locsim_core::geographic::{destination, distance, inverse};
 use locsim_core::movement::{model_for, MovementError, MovementModel, MovementSample};
 use locsim_core::noise::NoiseError;
 use locsim_core::provider::{
@@ -74,54 +75,10 @@ fn run(sc: &Scenario, seconds: f64) -> (Vec<SyntheticLocation>, ProviderStatus) 
     (out, status)
 }
 
-/// Independent re-check of an emitted stream against the scenario's limits
-/// (with the allowances configured noise is entitled to). Returns the number
-/// of consecutive pairs examined.
+/// Independent re-check of an emitted stream (see `common::recheck_stream`).
+/// Returns the number of consecutive pairs examined.
 fn check_stream(sc: &Scenario, stream: &[SyntheticLocation]) -> usize {
-    let m = &sc.movement;
-    let noisy = sc.noise.has_position_noise();
-    let offset_rate = if noisy {
-        sc.noise.max_offset_rate_mps
-    } else {
-        0.0
-    };
-    let reach = if noisy {
-        sc.noise.max_position_offset_m
-    } else {
-        0.0
-    };
-    let speed_slack = 2.0 * NOISE_CLIP_SIGMA * sc.noise.speed_noise_mps;
-    let heading_slack = 2.0 * NOISE_CLIP_SIGMA * sc.noise.heading_noise_deg;
-    let boundary = sc.boundary().unwrap();
-    for s in stream {
-        assert_eq!(s.validate(), Ok(()));
-        assert!(s.speed_mps.unwrap() <= m.max_speed_mps);
-        assert!(distance(boundary.center, s.coordinate).unwrap() <= boundary.radius_m);
-    }
-    for pair in stream.windows(2) {
-        let (a, b) = (&pair[0], &pair[1]);
-        assert!(b.timestamp > a.timestamp);
-        let dt = b.timestamp.seconds_since(a.timestamp);
-        let line = inverse(a.coordinate, b.coordinate).unwrap();
-        assert!(line.distance_m <= (m.max_speed_mps + offset_rate) * dt);
-        let dv = b.speed_mps.unwrap() - a.speed_mps.unwrap();
-        assert!(dv <= m.max_acceleration_mps2 * dt + speed_slack, "dv {dv}");
-        assert!(-dv <= m.max_deceleration_mps2 * dt + speed_slack, "dv {dv}");
-        if let (Some(c0), Some(c1)) = (a.course_deg, b.course_deg) {
-            let lat = a
-                .coordinate
-                .latitude()
-                .abs()
-                .max(b.coordinate.latitude().abs());
-            let convergence_slack = (2.0 * reach / 6.3e6 * lat.to_radians().tan()).to_degrees();
-            let limit = m.max_heading_rate_dps * dt + heading_slack + convergence_slack;
-            if limit < 180.0 {
-                let turn = bearing_difference(c0 + line.convergence_deg, c1).abs();
-                assert!(turn <= limit, "turned {turn} > {limit}");
-            }
-        }
-    }
-    stream.len() - 1
+    recheck_stream(sc, stream, "route").pairs
 }
 
 #[test]
@@ -143,17 +100,17 @@ fn route_without_noise_at_different_sample_intervals() {
     println!("route without noise: {pairs} consecutive pairs re-checked over 4 intervals");
 
     // The interval decides which instants are read, never what is there:
-    // at every whole second the 20 Hz and the 1 Hz streams agree exactly.
+    // at every whole second the 20 Hz and the 1 Hz streams are at exactly
+    // the same position.
     let (fine, coarse) = (&streams[0].1, &streams[2].1);
     for (k, c) in coarse.iter().enumerate() {
         let Some(f) = fine.get(k * 20) else {
             break;
         };
         assert_eq!(f.timestamp, c.timestamp);
-        assert_eq!(
-            (f.coordinate, f.speed_mps, f.course_deg),
-            (c.coordinate, c.speed_mps, c.course_deg)
-        );
+        // Positions agree exactly. Speed and course do not and should not:
+        // each stream reports the mean over its own interval.
+        assert_eq!(f.coordinate, c.coordinate);
     }
     // And every recorded point that falls on a sampled instant is emitted exactly.
     let mut exact = 0;
@@ -223,10 +180,14 @@ fn route_completion_holds_the_final_point() {
         let done = p.status().trajectory_complete;
         assert_eq!(done, n * interval_ns >= route.duration_ns(), "tick {n}");
         if done {
-            // No extrapolation, no stop, no error: the last point, at rest.
+            // No extrapolation, no stop, no error: the last point is held.
             assert_eq!(s.coordinate, last);
-            assert_eq!((s.speed_mps, s.course_deg), (Some(0.0), None));
             assert_eq!(p.status().state, SimulationState::Running);
+            // From the second held fix on, the position demonstrably did
+            // not move, so the reported speed is exactly zero.
+            if (n - 1) * interval_ns >= route.duration_ns() {
+                assert_eq!((s.speed_mps, s.course_deg), (Some(0.0), None));
+            }
         }
     }
     // Stopping and restarting replays from the beginning.
@@ -255,7 +216,8 @@ fn closed_route_loops_without_a_seam() {
     let pairs = check_stream(&sc, &stream);
     println!("closed loop: {pairs} consecutive pairs re-checked over 5 laps");
     // Each lap repeats the first exactly, and the seam is crossed at speed.
-    for (k, s) in stream.iter().enumerate().skip(120) {
+    // (From the second lap's second fix: the very first fix has no speed.)
+    for (k, s) in stream.iter().enumerate().skip(121) {
         let earlier = &stream[k - 120];
         assert_eq!(
             (s.coordinate, s.speed_mps, s.course_deg),
@@ -358,14 +320,26 @@ fn a_route_that_breaks_a_limit_never_starts() {
 }
 
 // --- Corrupted route output must be caught by the gate itself. -------------
+//
+// Speed and course are derived from the emitted positions, so the only thing
+// a faulty trajectory source can corrupt is the position. Each corruption
+// below moves one fix so that the *honestly derived* metadata implies
+// something impossible. (Corrupting the metadata itself is a different
+// failure, caught by the consistency stage; see `consistency_pipeline.rs`.)
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Corruption {
+    /// Three times as far sideways as the speed limit allows.
     Teleport,
+    /// Twice as far ahead as the speed limit allows: excessive speed.
     ExcessiveSpeed,
+    /// Further ahead than the acceleration limit allows, within the speed limit.
     ExcessiveAcceleration,
+    /// Barely moved from the previous fix: a stop no brake could make.
     ExcessiveDeceleration,
+    /// The same distance, in a direction 170 degrees off.
     ExcessiveTurn,
+    /// A hand's breadth outside the fence.
     BoundaryEscape,
 }
 
@@ -386,91 +360,119 @@ fn roomy_scenario() -> Scenario {
     sc.movement.max_speed_mps *= 4.0;
     sc.movement.radius_m = sc.movement.radius_m.map(|r| r * 1.5);
     assert_eq!(sc.validate(), Ok(()));
+    // The turn corruption is 170 degrees; it must exceed what two intervals allow.
+    assert!(sc.movement.max_heading_rate_dps * 2.0 * sc.update_interval_s < 140.0);
     sc
 }
 
-/// Applies one corruption to an otherwise correct route sample.
-fn corrupt(kind: Corruption, sc: &Scenario, clean: MovementSample) -> MovementSample {
+/// How much the gate lets chord speed change between two fixes of `sc`.
+fn speed_change_allowed(sc: &Scenario, rate_mps2: f64) -> f64 {
     let m = &sc.movement;
     let dt = sc.update_interval_s;
-    let speed = clean.speed_mps.unwrap();
-    let course = clean.course_deg.unwrap();
+    let shortfall =
+        m.max_speed_mps * (1.0 - (0.5 * m.max_heading_rate_dps * dt).to_radians().cos());
+    rate_mps2 * dt + shortfall
+}
+
+/// Moves one otherwise correct route fix. `previous` is the fix before it.
+fn corrupt(kind: Corruption, sc: &Scenario, previous: Coordinate, clean: Coordinate) -> Coordinate {
+    let m = &sc.movement;
+    let dt = sc.update_interval_s;
+    let chord = inverse(previous, clean).unwrap();
     match kind {
-        // Three times as far sideways as the speed limit allows in one step.
-        Corruption::Teleport => MovementSample {
-            coordinate: destination(clean.coordinate, course + 90.0, 3.0 * m.max_speed_mps * dt)
-                .unwrap(),
-            ..clean
-        },
-        Corruption::ExcessiveSpeed => MovementSample {
-            speed_mps: Some(m.max_speed_mps * 1.2),
-            ..clean
-        },
-        Corruption::ExcessiveAcceleration => MovementSample {
-            speed_mps: Some(speed + 3.0 * m.max_acceleration_mps2 * dt),
-            ..clean
-        },
-        Corruption::ExcessiveDeceleration => MovementSample {
-            speed_mps: Some(1e-3),
-            ..clean
-        },
-        Corruption::ExcessiveTurn => MovementSample {
-            course_deg: Some((course + 150.0) % 360.0),
-            ..clean
-        },
-        // A hand's breadth outside the fence, on the same bearing.
+        Corruption::Teleport => destination(
+            clean,
+            chord.final_bearing_deg + 90.0,
+            3.0 * m.max_speed_mps * dt,
+        )
+        .unwrap(),
+        Corruption::ExcessiveSpeed => destination(
+            previous,
+            chord.initial_bearing_deg,
+            2.0 * m.max_speed_mps * dt,
+        )
+        .unwrap(),
+        Corruption::ExcessiveAcceleration => {
+            let extra_speed = 2.0 * speed_change_allowed(sc, m.max_acceleration_mps2) + 0.2;
+            let distance = chord.distance_m + extra_speed * dt;
+            assert!(
+                distance < m.max_speed_mps * dt,
+                "must stay within the speed limit"
+            );
+            destination(previous, chord.initial_bearing_deg, distance).unwrap()
+        }
+        Corruption::ExcessiveDeceleration => {
+            destination(previous, chord.initial_bearing_deg, 0.02 * chord.distance_m).unwrap()
+        }
+        Corruption::ExcessiveTurn => destination(
+            previous,
+            chord.initial_bearing_deg + 170.0,
+            chord.distance_m,
+        )
+        .unwrap(),
         Corruption::BoundaryEscape => {
             let b = sc.boundary().unwrap();
-            let bearing = inverse(b.center, clean.coordinate)
-                .unwrap()
-                .initial_bearing_deg;
-            MovementSample {
-                coordinate: destination(b.center, bearing, b.radius_m + 0.1).unwrap(),
-                ..clean
-            }
+            let bearing = inverse(b.center, clean).unwrap().initial_bearing_deg;
+            destination(b.center, bearing, b.radius_m + 0.1).unwrap()
         }
     }
 }
 
-/// The clean route samples at the scenario interval, and the index of one
-/// taken at walking pace well inside the fence, with a moving predecessor.
-fn clean_samples(sc: &Scenario) -> (Vec<MovementSample>, usize) {
+/// The clean route positions at the scenario interval, and the index of one
+/// reached at walking pace, well inside the fence, with moving predecessors.
+fn clean_positions(sc: &Scenario) -> (Vec<Coordinate>, usize) {
     let mut model = model_for(sc).unwrap();
-    let interval_ns = (sc.update_interval_s * 1e9) as i64;
-    let samples: Vec<MovementSample> = (0..150)
+    let dt = sc.update_interval_s;
+    let interval_ns = (dt * 1e9) as i64;
+    let positions: Vec<Coordinate> = (0..150)
         .map(|n| {
             model
                 .sample_at(Timestamp::from_nanos(START + n * interval_ns))
                 .unwrap()
+                .coordinate
         })
         .collect();
     let b = sc.boundary().unwrap();
-    let limit = sc.movement.max_deceleration_mps2 * sc.update_interval_s;
-    let target = (5..samples.len())
+    let speed = |i: usize| distance(positions[i - 1], positions[i]).unwrap() / dt;
+    // Fast enough that stopping dead is far beyond the braking limit.
+    let needed = speed_change_allowed(sc, sc.movement.max_deceleration_mps2) + 0.3;
+    let target = (5..positions.len())
         .find(|&i| {
-            let ok =
-                |s: &MovementSample| s.speed_mps.unwrap() > limit + 0.5 && s.course_deg.is_some();
-            ok(&samples[i])
-                && ok(&samples[i - 1])
-                && distance(b.center, samples[i].coordinate).unwrap() < 0.4 * b.radius_m
+            speed(i) > needed
+                && speed(i - 1) > needed
+                && distance(b.center, positions[i]).unwrap() < 0.4 * b.radius_m
         })
-        .expect("a cruising sample well inside the fence");
-    (samples, target)
+        .expect("a cruising fix well inside the fence");
+    (positions, target)
 }
 
-fn as_location(sc: &Scenario, n: usize, s: &MovementSample) -> SyntheticLocation {
+/// Samples as the pipeline would emit them for these positions: metadata
+/// derived from the positions themselves.
+fn emitted(sc: &Scenario, positions: &[Coordinate]) -> Vec<SyntheticLocation> {
     let interval_ns = (sc.update_interval_s * 1e9) as i64;
-    SyntheticLocation {
-        timestamp: Timestamp::from_nanos(START + n as i64 * interval_ns),
-        coordinate: s.coordinate,
-        altitude_m: s.altitude_m,
-        horizontal_accuracy_m: sc.horizontal_accuracy_m,
-        vertical_accuracy_m: sc.vertical_accuracy_m,
-        speed_mps: s.speed_mps,
-        course_deg: s.course_deg,
-        source: LocationSource::Simulation,
-        simulation_state: SimulationState::Running,
-    }
+    let mut deriver = KinematicsDeriver::new();
+    positions
+        .iter()
+        .enumerate()
+        .map(|(n, coordinate)| {
+            let timestamp = Timestamp::from_nanos(START + n as i64 * interval_ns);
+            let k = deriver
+                .derive(timestamp, *coordinate, ObservationNoise::NONE)
+                .unwrap();
+            deriver.accept(timestamp, *coordinate);
+            SyntheticLocation {
+                timestamp,
+                coordinate: *coordinate,
+                altitude_m: sc.altitude_m,
+                horizontal_accuracy_m: sc.horizontal_accuracy_m,
+                vertical_accuracy_m: sc.vertical_accuracy_m,
+                speed_mps: k.speed_mps,
+                course_deg: k.course_deg,
+                source: LocationSource::Simulation,
+                simulation_state: SimulationState::Running,
+            }
+        })
+        .collect()
 }
 
 fn expected(kind: Corruption, e: &ValidationError) -> bool {
@@ -481,7 +483,7 @@ fn expected(kind: Corruption, e: &ValidationError) -> bool {
             ValidationError::ImpossibleDisplacement { .. }
         ) | (
             Corruption::ExcessiveSpeed,
-            ValidationError::SpeedAboveMaximum { .. }
+            ValidationError::ImpossibleDisplacement { .. }
         ) | (
             Corruption::ExcessiveAcceleration,
             ValidationError::AccelerationExceeded { .. }
@@ -500,64 +502,72 @@ fn expected(kind: Corruption, e: &ValidationError) -> bool {
 
 #[test]
 fn the_gate_alone_rejects_each_kind_of_corrupted_route_output() {
-    // No provider, no noise stage, no admission in the loop: route samples
-    // are handed straight to the validator the provider would use.
+    // No provider, no noise stage, no admission in the loop: route positions
+    // with honestly derived metadata are handed straight to the validator
+    // the provider would use.
     let sc = roomy_scenario();
-    let (samples, target) = clean_samples(&sc);
+    let (positions, target) = clean_positions(&sc);
 
     // The clean stream passes in full.
+    let clean = emitted(&sc, &positions);
     let mut gate = SampleValidator::with_limits(SampleLimits::for_scenario(&sc));
-    for (n, s) in samples.iter().enumerate() {
-        assert_eq!(
-            gate.validate(&as_location(&sc, n, s)),
-            Ok(()),
-            "clean sample {n}"
-        );
+    for (n, s) in clean.iter().enumerate() {
+        assert_eq!(gate.validate(s), Ok(()), "clean sample {n}");
     }
 
     for kind in CORRUPTIONS {
+        let mut moved = positions[..=target].to_vec();
+        moved[target] = corrupt(kind, &sc, positions[target - 1], positions[target]);
+        let stream = emitted(&sc, &moved);
         let mut gate = SampleValidator::with_limits(SampleLimits::for_scenario(&sc));
-        for (n, s) in samples.iter().enumerate().take(target) {
-            gate.validate(&as_location(&sc, n, s)).unwrap();
+        for s in &stream[..target] {
+            gate.validate(s).unwrap();
         }
-        let bad = corrupt(kind, &sc, samples[target]);
         let error = gate
-            .validate(&as_location(&sc, target, &bad))
-            .expect_err("corrupted sample accepted");
+            .validate(&stream[target])
+            .expect_err("corrupted fix accepted");
         assert!(expected(kind, &error), "{kind:?} was reported as {error:?}");
-        // The rejected sample left no trace: the true one is still accepted.
-        assert_eq!(
-            gate.validate(&as_location(&sc, target, &samples[target])),
-            Ok(())
-        );
+        // The rejected fix left no trace: the true one is still accepted.
+        assert_eq!(gate.validate(&clean[target]), Ok(()));
     }
 }
 
-/// A route model whose `target`-th sample is corrupted.
+/// A route model whose `target`-th fix is moved.
 struct Corrupting {
     inner: Box<dyn MovementModel + Send>,
     scenario: Scenario,
     kind: Corruption,
     target: usize,
     count: usize,
+    previous: Option<Coordinate>,
 }
 
 impl MovementModel for Corrupting {
     fn sample_at(&mut self, t: Timestamp) -> Result<MovementSample, MovementError> {
         let clean = self.inner.sample_at(t)?;
+        let index = self.count;
         self.count += 1;
-        if self.count - 1 == self.target {
-            Ok(corrupt(self.kind, &self.scenario, clean))
-        } else {
-            Ok(clean)
+        let previous = self.previous.replace(clean.coordinate);
+        if index != self.target {
+            return Ok(clean);
         }
+        let coordinate = corrupt(
+            self.kind,
+            &self.scenario,
+            previous.expect("target is not the first fix"),
+            clean.coordinate,
+        );
+        Ok(MovementSample {
+            coordinate,
+            ..clean
+        })
     }
 }
 
 #[test]
 fn corrupted_route_output_never_leaves_the_provider() {
     let sc = roomy_scenario();
-    let (_, target) = clean_samples(&sc);
+    let (_, target) = clean_positions(&sc);
     let interval_ns = (sc.update_interval_s * 1e9) as i64;
     for kind in CORRUPTIONS {
         let for_factory = sc.clone();
@@ -568,6 +578,7 @@ fn corrupted_route_output_never_leaves_the_provider() {
                 kind,
                 target,
                 count: 0,
+                previous: None,
             }))
         });
         let mut p = SimulationProvider::with_model_factory(sc.clone(), factory);
@@ -580,7 +591,7 @@ fn corrupted_route_output_never_leaves_the_provider() {
         let before = p.current_location();
         let error = p
             .poll(Timestamp::from_nanos(START + target as i64 * interval_ns))
-            .expect_err("corrupted sample emitted");
+            .expect_err("corrupted fix emitted");
         match (&error, kind) {
             // The noise stage sits upstream of the gate and refuses an
             // out-of-bounds base position before the gate sees it; the

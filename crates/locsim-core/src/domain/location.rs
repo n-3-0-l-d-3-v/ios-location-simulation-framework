@@ -16,6 +16,11 @@ pub enum LocationSource {
 
 /// The canonical sample emitted by the simulation core.
 ///
+/// The position and timestamp are the authoritative observation. Speed and
+/// course are derived from consecutive emitted positions (see
+/// `crate::consistency`); they describe the emitted trajectory and nothing
+/// else.
+///
 /// Unknown speed/course are `None` here; mapping to platform sentinels
 /// (Core Location's `-1`) is the platform adapter's job.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,9 +30,14 @@ pub struct SyntheticLocation {
     pub altitude_m: f64,
     pub horizontal_accuracy_m: f64,
     pub vertical_accuracy_m: f64,
-    /// Ground speed in m/s.
+    /// Mean ground speed over the interval since the previous emitted
+    /// sample, m/s: geodesic distance over elapsed time. `None` for the
+    /// first sample of a run; exactly 0 when the position did not move.
     pub speed_mps: Option<f64>,
-    /// Direction of travel in degrees clockwise from true north, `[0, 360)`.
+    /// Direction of travel on arriving at this position from the previous
+    /// emitted one, degrees clockwise from true north, `[0, 360)`. `None`
+    /// when there is no previous sample or the position moved less than
+    /// 0.1 mm; never carried over from an earlier sample.
     pub course_deg: Option<f64>,
     pub source: LocationSource,
     pub simulation_state: SimulationState,

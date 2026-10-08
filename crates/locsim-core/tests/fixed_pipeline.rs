@@ -88,11 +88,10 @@ fn samples_are_valid_stationary_and_on_the_grid_for_random_scenarios() {
         for s in &samples {
             assert_eq!(s.validate(), Ok(()), "case {case}");
             assert_eq!(s.coordinate, origin, "case {case}");
-            assert_eq!(
-                (s.speed_mps, s.course_deg),
-                (Some(0.0), None),
-                "case {case}"
-            );
+            // Speed is derived from the emitted positions: unknown for the
+            // first fix, exactly zero for every later one. Never a course.
+            assert_eq!(s.speed_mps, previous.map(|_| 0.0), "case {case}");
+            assert_eq!(s.course_deg, None, "case {case}");
             assert_eq!(s.simulation_state, SimulationState::Running);
             // Exactly on the grid: no drift regardless of poll timing.
             let offset = s.timestamp.as_nanos() - start.as_nanos();

@@ -4,6 +4,9 @@
 //!
 //! Movement is the fixed model, the only one that exists so far.
 
+mod common;
+
+use common::recheck_stream;
 use locsim_core::domain::{
     Coordinate, MovementMode, MovementParameters, NoiseParameters, PlaybackParameters,
     RotationDirection, Scenario, SimulationState, SyntheticLocation, Timestamp,
@@ -94,6 +97,7 @@ fn run(sc: &Scenario, polls: usize, poll_seed: u64, max_gap: f64) -> Vec<Synthet
 fn final_output_respects_every_limit_for_random_noisy_scenarios() {
     let mut rng = Rng::from_seed(0x0404);
     let mut noisy_streams = 0;
+    let mut rechecked = 0;
     for case in 0..300u64 {
         let origin = match case % 10 {
             0 => Coordinate::new(90.0, 0.0).unwrap(),
@@ -139,12 +143,6 @@ fn final_output_respects_every_limit_for_random_noisy_scenarios() {
             let (lat, lon) = (s.coordinate.latitude(), s.coordinate.longitude());
             assert!((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon));
 
-            // A fixed scenario stays stationary in its metadata.
-            assert_eq!(
-                (s.speed_mps, s.course_deg),
-                (Some(0.0), None),
-                "case {case}"
-            );
             assert_eq!(s.altitude_m, 30.0);
 
             // Offset bound and boundary, measured from the scenario origin.
@@ -176,7 +174,11 @@ fn final_output_respects_every_limit_for_random_noisy_scenarios() {
             previous = Some(*s);
         }
         noisy_streams += moved as u32;
+        // The true point is fixed, but the emitted one moves with the noise,
+        // and the reported speed and course describe that emitted movement.
+        rechecked += recheck_stream(&sc, &stream, &format!("case {case}")).pairs;
     }
+    println!("noisy fixed: {rechecked} consecutive pairs re-checked");
     assert!(
         noisy_streams > 290,
         "noise was active in only {noisy_streams} streams"

@@ -5,6 +5,9 @@
 //! for any valid scenario, with and without noise? And does the gate reject
 //! a model that misbehaves?
 
+mod common;
+
+use common::recheck_stream;
 use locsim_core::domain::{
     Coordinate, MovementMode, MovementParameters, NoiseParameters, PlaybackParameters,
     RotationDirection, Scenario, SimulationState, SyntheticLocation, Timestamp,
@@ -170,83 +173,10 @@ fn run(sc: &Scenario, polls: usize, poll_seed: u64, max_gap: f64) -> Vec<Synthet
     out
 }
 
-/// Independent re-check of a finished stream against the scenario's limits.
+/// Independent re-check of a finished stream (see `common::recheck_stream`).
 /// Returns how many consecutive pairs were examined.
 fn check_stream(sc: &Scenario, stream: &[SyntheticLocation], case: u64) -> usize {
-    let m = &sc.movement;
-    let noisy_position = sc.noise.has_position_noise();
-    let offset_rate = if noisy_position {
-        sc.noise.max_offset_rate_mps
-    } else {
-        0.0
-    };
-    let reach = if noisy_position {
-        sc.noise.max_position_offset_m
-    } else {
-        0.0
-    };
-    let speed_slack = 2.0 * NOISE_CLIP_SIGMA * sc.noise.speed_noise_mps;
-    let heading_slack = 2.0 * NOISE_CLIP_SIGMA * sc.noise.heading_noise_deg;
-    let interval_ns = (sc.update_interval_s * 1e9).round() as i64;
-    let boundary = sc.boundary();
-
-    for s in stream {
-        assert_eq!(s.validate(), Ok(()), "case {case}");
-        if let Some(v) = s.speed_mps {
-            assert!(v <= m.max_speed_mps, "case {case}: speed {v}");
-        }
-        if let Some(b) = boundary {
-            let d = distance(b.center, s.coordinate).unwrap();
-            assert!(d <= b.radius_m, "case {case}: {d} outside {}", b.radius_m);
-        }
-    }
-    for pair in stream.windows(2) {
-        let (a, b) = (&pair[0], &pair[1]);
-        assert!(b.timestamp > a.timestamp, "case {case}");
-        assert_eq!(
-            (b.timestamp.as_nanos() - START) % interval_ns,
-            0,
-            "case {case}"
-        );
-        let dt = b.timestamp.seconds_since(a.timestamp);
-        let line = inverse(a.coordinate, b.coordinate).unwrap();
-
-        let limit = (sc.effective_max_speed_mps() + offset_rate) * dt;
-        assert!(
-            line.distance_m <= limit,
-            "case {case}: moved {} > {limit}",
-            line.distance_m
-        );
-
-        if let (Some(v0), Some(v1)) = (a.speed_mps, b.speed_mps) {
-            let dv = v1 - v0;
-            assert!(
-                dv <= m.max_acceleration_mps2 * dt + speed_slack,
-                "case {case}: dv {dv}"
-            );
-            assert!(
-                -dv <= m.max_deceleration_mps2 * dt + speed_slack,
-                "case {case}: dv {dv}"
-            );
-        }
-        if let (Some(c0), Some(c1)) = (a.course_deg, b.course_deg) {
-            // Slightly more generous than the gate's own allowance (smaller
-            // radius), so this never fails where the gate passed.
-            let lat = a
-                .coordinate
-                .latitude()
-                .abs()
-                .max(b.coordinate.latitude().abs());
-            let pole = (lat.to_radians() + reach / 6.3e6).min(std::f64::consts::FRAC_PI_2);
-            let convergence_slack = (2.0 * reach / 6.3e6 * pole.tan()).to_degrees();
-            let limit = m.max_heading_rate_dps * dt + heading_slack + convergence_slack;
-            if limit < 180.0 {
-                let turn = bearing_difference(c0 + line.convergence_deg, c1).abs();
-                assert!(turn <= limit, "case {case}: turned {turn} > {limit}");
-            }
-        }
-    }
-    stream.len().saturating_sub(1)
+    recheck_stream(sc, stream, &format!("case {case}")).pairs
 }
 
 #[test]
@@ -415,7 +345,12 @@ fn a_long_pause_does_not_make_a_walker_leap() {
     assert!(moved <= 1.8 && moved > 0.5, "moved {moved}");
 }
 
-// --- The gate must catch models that misbehave. ---------------------------
+// --- The gate must catch trajectories that misbehave. -----------------------
+//
+// Speed and course are derived from the emitted positions, so a model can no
+// longer emit bad metadata directly: whatever it claims is ignored. What it
+// can still do is produce positions that imply impossible kinematics, and
+// that is what these scripts do.
 
 /// Replays a fixed list of samples regardless of time.
 struct Scripted(std::vec::IntoIter<MovementSample>);
@@ -435,25 +370,36 @@ fn scripted_factory(script: Vec<MovementSample>) -> ModelFactory {
     })
 }
 
-fn at(north_m: f64, speed: f64, course: Option<f64>) -> MovementSample {
+/// A scripted position `north_m` metres north of the start. The speed and
+/// course the model claims are deliberately absurd: they must not matter.
+fn at(north_m: f64) -> MovementSample {
     MovementSample {
         coordinate: destination(bengaluru(), 0.0, north_m).unwrap(),
         altitude_m: 15.0,
-        speed_mps: Some(speed),
-        course_deg: course,
+        speed_mps: Some(123.0),
+        course_deg: Some(321.0),
     }
+}
+
+fn script(north_m: &[f64]) -> Vec<MovementSample> {
+    north_m.iter().map(|m| at(*m)).collect()
+}
+
+fn scripted_provider(script: Vec<MovementSample>, radius_m: Option<f64>) -> SimulationProvider {
+    let mut m = MovementParameters::walking_preset();
+    m.radius_m = radius_m;
+    let sc = scenario(MovementMode::Walking, bengaluru(), m);
+    let mut p = SimulationProvider::with_model_factory(sc, scripted_factory(script));
+    p.start(Timestamp::from_nanos(START)).unwrap();
+    p
 }
 
 /// Runs a script through the provider (walking limits: 1.8 m/s, 0.8 m/s²
 /// up, 1.2 m/s² down, 60°/s, 1 Hz) and returns the first rejection and how
 /// many samples were emitted before it.
 fn first_rejection(script: Vec<MovementSample>, radius_m: Option<f64>) -> (usize, ProviderError) {
-    let mut m = MovementParameters::walking_preset();
-    m.radius_m = radius_m;
-    let sc = scenario(MovementMode::Walking, bengaluru(), m);
     let length = script.len();
-    let mut p = SimulationProvider::with_model_factory(sc, scripted_factory(script));
-    p.start(Timestamp::from_nanos(START)).unwrap();
+    let mut p = scripted_provider(script, radius_m);
     for n in 0..length {
         if let Err(e) = p.poll(Timestamp::from_nanos(START + n as i64 * SEC)) {
             assert_eq!(p.status().state, SimulationState::Error);
@@ -464,14 +410,15 @@ fn first_rejection(script: Vec<MovementSample>, radius_m: Option<f64>) -> (usize
     panic!("the gate accepted the whole script");
 }
 
+/// What a 60°/s turner at up to 1.8 m/s can lose in chord speed over 1 s.
+fn chord_shortfall() -> f64 {
+    1.8 * (1.0 - 30f64.to_radians().cos())
+}
+
 #[test]
 fn gate_rejects_teleportation() {
-    let script = vec![
-        at(0.0, 0.0, None),
-        at(0.0, 0.0, None),
-        at(500.0, 0.0, None), // half a kilometre in one second
-    ];
-    match first_rejection(script, None) {
+    // Half a kilometre in one second.
+    match first_rejection(script(&[0.0, 0.0, 500.0]), None) {
         (
             2,
             ProviderError::Validation(ValidationError::ImpossibleDisplacement {
@@ -488,17 +435,23 @@ fn gate_rejects_teleportation() {
 
 #[test]
 fn gate_rejects_instantaneous_acceleration() {
-    // Positions are plausible; only the speed jumps from rest to full.
-    let script = vec![at(0.0, 0.0, None), at(0.9, 1.8, Some(0.0))];
-    match first_rejection(script, None) {
+    // Standing, then 1.7 m in the next second: within the speed limit, but
+    // from rest to 1.7 m/s between two samples.
+    match first_rejection(script(&[0.0, 0.0, 1.7]), None) {
         (
-            1,
+            2,
             ProviderError::Validation(ValidationError::AccelerationExceeded {
                 change_mps,
                 limit_mps,
             }),
         ) => {
-            assert_eq!((change_mps, limit_mps), (1.8, 0.8));
+            assert!((change_mps - 1.7).abs() < 1e-6);
+            // 0.8 m/s² over the 1 s between interval midpoints, plus what
+            // turning could have cost the earlier chord.
+            assert!(
+                (limit_mps - (0.8 + chord_shortfall())).abs() < 1e-6,
+                "{limit_mps}"
+            );
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -506,22 +459,20 @@ fn gate_rejects_instantaneous_acceleration() {
 
 #[test]
 fn gate_rejects_instantaneous_stops() {
-    let script = vec![
-        at(0.0, 0.0, None),
-        at(0.4, 0.8, Some(0.0)),
-        at(1.6, 1.6, Some(0.0)),
-        at(3.2, 1.6, Some(0.0)),
-        at(4.0, 0.0, None), // 1.6 m/s to nothing in a second
-    ];
-    match first_rejection(script, None) {
+    // Up to 1.6 m/s gently, then nothing.
+    match first_rejection(script(&[0.0, 0.4, 1.4, 3.0, 4.6, 4.6]), None) {
         (
-            4,
+            5,
             ProviderError::Validation(ValidationError::DecelerationExceeded {
                 change_mps,
                 limit_mps,
             }),
         ) => {
-            assert_eq!((change_mps, limit_mps), (1.6, 1.2));
+            assert!((change_mps - 1.6).abs() < 1e-6);
+            assert!(
+                (limit_mps - (1.2 + chord_shortfall())).abs() < 1e-6,
+                "{limit_mps}"
+            );
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -529,14 +480,9 @@ fn gate_rejects_instantaneous_stops() {
 
 #[test]
 fn gate_rejects_instantaneous_heading_changes() {
-    let script = vec![
-        at(0.0, 0.0, None),
-        at(0.4, 0.8, Some(0.0)),
-        at(1.4, 1.0, Some(0.0)),
-        at(2.4, 1.0, Some(0.0)),
-        at(1.4, 1.0, Some(180.0)), // about-turn at full stride
-    ];
-    match first_rejection(script, None) {
+    // North at a steady 1 m/s, then one metre back south: an about-turn
+    // between two samples, at unchanged speed.
+    match first_rejection(script(&[0.0, 0.4, 1.4, 2.4, 1.4]), None) {
         (
             4,
             ProviderError::Validation(ValidationError::HeadingRateExceeded {
@@ -544,8 +490,9 @@ fn gate_rejects_instantaneous_heading_changes() {
                 limit_deg,
             }),
         ) => {
-            assert!((turn_deg - 180.0).abs() < 1e-9);
-            assert_eq!(limit_deg, 60.0);
+            assert!((turn_deg - 180.0).abs() < 1e-6);
+            // 60°/s over the two 1 s intervals the two chords span.
+            assert!((limit_deg - 120.0).abs() < 1e-5, "{limit_deg}");
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -554,14 +501,7 @@ fn gate_rejects_instantaneous_heading_changes() {
 #[test]
 fn a_model_leaving_the_boundary_is_stopped_before_emission() {
     // Kinematically impeccable, but it walks out of a 3 m fence.
-    let script = vec![
-        at(0.0, 0.0, None),
-        at(0.4, 0.8, Some(0.0)),
-        at(1.4, 1.0, Some(0.0)),
-        at(2.4, 1.0, Some(0.0)),
-        at(3.4, 1.0, Some(0.0)),
-    ];
-    match first_rejection(script, Some(3.0)) {
+    match first_rejection(script(&[0.0, 0.4, 1.4, 2.4, 3.4]), Some(3.0)) {
         // The noise stage sits upstream and refuses an out-of-bounds base
         // first; the gate's own boundary check is covered by its unit tests.
         (
@@ -579,25 +519,29 @@ fn a_model_leaving_the_boundary_is_stopped_before_emission() {
 }
 
 #[test]
-fn a_well_behaved_script_is_accepted() {
-    // The same harness must not reject legitimate motion.
-    let script = vec![
-        at(0.0, 0.0, None),
-        at(0.4, 0.8, Some(0.0)),
-        at(1.6, 1.6, Some(0.0)),
-        at(3.3, 1.8, Some(0.0)),
-        at(4.8, 1.2, Some(0.0)),
-        at(5.4, 0.0, None),
-    ];
-    let mut m = MovementParameters::walking_preset();
-    m.radius_m = Some(10.0);
-    let sc = scenario(MovementMode::Walking, bengaluru(), m);
-    let mut p = SimulationProvider::with_model_factory(sc, scripted_factory(script));
-    p.start(Timestamp::from_nanos(START)).unwrap();
-    for n in 0..6 {
-        p.poll(Timestamp::from_nanos(START + n * SEC))
+fn a_well_behaved_script_is_accepted_and_its_claimed_metadata_ignored() {
+    // Legitimate positions; the script still claims 123 m/s on course 321°.
+    let north = [0.0, 0.4, 1.6, 3.3, 4.8, 5.4, 5.4];
+    let mut p = scripted_provider(script(&north), Some(10.0));
+    let mut speeds = Vec::new();
+    for n in 0..north.len() {
+        let s = p
+            .poll(Timestamp::from_nanos(START + n as i64 * SEC))
             .unwrap()
             .unwrap();
+        // What is emitted describes the positions, not the claim.
+        assert!(
+            s.course_deg.is_none()
+                || s.course_deg.unwrap().min(360.0 - s.course_deg.unwrap()) < 1e-3
+        );
+        speeds.push(s.speed_mps);
     }
-    assert_eq!(p.status().sample_count, 6);
+    assert_eq!(p.status().sample_count, 7);
+    assert_eq!(speeds[0], None);
+    for (reported, expected) in speeds[1..].iter().zip([0.4, 1.2, 1.7, 1.5, 0.6, 0.0]) {
+        assert!(
+            (reported.unwrap() - expected).abs() < 1e-6,
+            "{reported:?} vs {expected}"
+        );
+    }
 }

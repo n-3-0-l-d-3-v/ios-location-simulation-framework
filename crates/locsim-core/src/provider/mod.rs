@@ -9,6 +9,7 @@ mod simulation;
 
 pub use simulation::{ModelFactory, SimulationProvider};
 
+use crate::consistency::DeriveError;
 use crate::domain::{
     ConfigError, InvalidTransition, SimulationState, SyntheticLocation, Timestamp,
 };
@@ -25,6 +26,8 @@ pub enum ProviderError {
     Schedule(ScheduleError),
     Movement(MovementError),
     Noise(NoiseError),
+    /// Speed and course could not be derived from the emitted positions.
+    Derivation(DeriveError),
     /// A generated sample was rejected by the validation gate.
     Validation(ValidationError),
 }
@@ -43,6 +46,7 @@ impl fmt::Display for ProviderError {
             ProviderError::Schedule(e) => write!(f, "scheduler: {e}"),
             ProviderError::Movement(e) => write!(f, "{e}"),
             ProviderError::Noise(e) => write!(f, "{e}"),
+            ProviderError::Derivation(e) => write!(f, "{e}"),
             ProviderError::Validation(e) => write!(f, "{e}"),
         }
     }
@@ -71,6 +75,12 @@ impl From<MovementError> for ProviderError {
 impl From<NoiseError> for ProviderError {
     fn from(e: NoiseError) -> Self {
         ProviderError::Noise(e)
+    }
+}
+
+impl From<DeriveError> for ProviderError {
+    fn from(e: DeriveError) -> Self {
+        ProviderError::Derivation(e)
     }
 }
 

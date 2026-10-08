@@ -1,6 +1,10 @@
 //! Shared helpers for the route integration tests: random routes and the
 //! tightest limits a given route can be admitted under.
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
+
+mod recheck;
+
+pub use recheck::{recheck_stream, Recheck};
 
 use locsim_core::domain::{
     Boundary, Coordinate, MovementMode, MovementParameters, NoiseParameters, PlaybackParameters,
