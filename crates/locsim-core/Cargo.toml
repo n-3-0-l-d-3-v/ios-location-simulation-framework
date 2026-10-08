@@ -1,0 +1,11 @@
+[package]
+name = "locsim-core"
+description = "Platform-independent synthetic location simulation core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Intentionally dependency-free: geodesy and the PRNG are implemented in-crate
+# so that seeded output is reproducible across toolchains and dependency bumps.
+[dependencies]
