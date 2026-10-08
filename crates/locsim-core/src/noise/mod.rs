@@ -28,11 +28,13 @@
 //! 3. inside the scenario boundary, if there is one.
 //!
 //! The candidate is first shaped by projections onto those three sets. If the
-//! result still fails the exact check (possible only through curvature or
-//! rounding), a fallback on the geodesic from the previous output towards the
-//! true position is used, which satisfies all three by the triangle
-//! inequality. If even that fails the engine returns an error instead of a
-//! position. With all components disabled the engine is an exact identity.
+//! result still fails the exact check (curvature, rounding, or limits below
+//! the numerical resolution), fallbacks are tried in order: a point on the
+//! geodesic from the previous output towards the true position (which
+//! satisfies all three by the triangle inequality), then holding the previous
+//! output, then the true position itself. If none passes the exact check the
+//! engine returns an error instead of a position. With all components
+//! disabled the engine is an exact identity.
 
 use crate::domain::{Boundary, ConfigError, Coordinate, NoiseParameters, Scenario, Timestamp};
 use crate::domain::{SyntheticLocation, NOISE_CLIP_SIGMA};
@@ -44,6 +46,10 @@ use std::fmt;
 /// Relative safety margin applied to limits while shaping a candidate, so
 /// that the exact geodesic check normally passes on the first attempt.
 const MARGIN: f64 = 1e-6;
+/// Absolute counterpart of [`MARGIN`], well above the ~1e-9 m resolution of
+/// the geodesic routines, for limits so small that a relative margin alone
+/// would vanish.
+const ABSOLUTE_MARGIN_M: f64 = 1e-7;
 /// The working tangent plane is re-anchored when the true position moves
 /// this far from its origin, keeping planar and geodesic distances in
 /// agreement to ~1e-8 relative.
@@ -161,6 +167,54 @@ fn project_into_disc(p: V2, center: V2, radius: f64) -> V2 {
         e: center.e + de * k,
         n: center.n + dn * k,
     }
+}
+
+fn in_disc(p: V2, center: V2, radius: f64) -> bool {
+    (p.e - center.e).hypot(p.n - center.n) <= radius
+}
+
+/// Nearest point to `p` inside the intersection of two discs, or `None` if
+/// the discs do not intersect.
+///
+/// Projecting onto one disc and then the other is *not* enough: the second
+/// projection can leave the first disc, and alternating converges slowly
+/// when the intersection is a thin lens. The exact answer is either the
+/// projection onto one disc (when that already lies in the other) or one of
+/// the two corners of the lens.
+fn project_into_lens(p: V2, c1: V2, r1: f64, c2: V2, r2: f64) -> Option<V2> {
+    let a = project_into_disc(p, c1, r1);
+    if in_disc(a, c2, r2) {
+        return Some(a);
+    }
+    let b = project_into_disc(p, c2, r2);
+    if in_disc(b, c1, r1) {
+        return Some(b);
+    }
+    let (de, dn) = (c2.e - c1.e, c2.n - c1.n);
+    let d = de.hypot(dn);
+    if d == 0.0 {
+        return None;
+    }
+    // Distance from c1 along the centre line to the chord joining the corners.
+    let along = (r1 * r1 - r2 * r2 + d * d) / (2.0 * d);
+    let half_chord_sq = r1 * r1 - along * along;
+    if half_chord_sq < 0.0 {
+        return None;
+    }
+    let half_chord = half_chord_sq.sqrt();
+    let (ue, un) = (de / d, dn / d);
+    let corner = |sign: f64| V2 {
+        e: c1.e + along * ue - sign * half_chord * un,
+        n: c1.n + along * un + sign * half_chord * ue,
+    };
+    let (k1, k2) = (corner(1.0), corner(-1.0));
+    let dist = |k: V2| (k.e - p.e).hypot(k.n - p.n);
+    Some(if dist(k1) <= dist(k2) { k1 } else { k2 })
+}
+
+/// A limit pulled in by the safety margins (never below zero).
+fn tighten(limit_m: f64) -> f64 {
+    (limit_m * (1.0 - MARGIN) - ABSOLUTE_MARGIN_M).max(0.0)
 }
 
 /// Clipped first-order Gauss–Markov scalar process.
@@ -483,6 +537,16 @@ impl NoiseEngine {
                 n: enu.north,
             })
         };
+        // Inverse of `to_plane`. Dropping a plane point onto the ellipsoid
+        // follows the *local* normal, which is tilted relative to the plane's
+        // own, so the landing point maps back slightly closer to the anchor
+        // (by ρ³/2R², ~12 µm at 1 km). One correction step removes that;
+        // without it the planar step limit and the geodesic check disagree
+        // whenever the limit is small.
+        let from_plane = |q: V2| -> Result<Coordinate, NoiseError> {
+            let landed = to_plane(frame.horizontal_to_coordinate(q.e, q.n)?)?;
+            Ok(frame.horizontal_to_coordinate(q.e + (q.e - landed.e), q.n + (q.n - landed.n))?)
+        };
 
         let position = self.position.as_mut().expect("checked by caller");
         position.drift.advance(dt.unwrap_or(0.0));
@@ -518,10 +582,9 @@ impl NoiseEngine {
             Ok(true)
         };
 
-        let shrink = 1.0 - MARGIN;
         let p = to_plane(base)?;
         let step_plane = match step {
-            Some(s) => Some((to_plane(s.from)?, s.max_m * shrink)),
+            Some(s) => Some((to_plane(s.from)?, tighten(s.max_m))),
             None => None,
         };
         let mut q = V2 {
@@ -529,16 +592,22 @@ impl NoiseEngine {
             n: p.n + offset.n,
         };
         for _ in 0..MAX_PROJECTION_ROUNDS {
-            q = project_into_disc(q, p, max_offset_m * shrink);
-            if let Some((center, radius)) = step_plane {
-                q = project_into_disc(q, center, radius);
-            }
-            let mut c = frame.horizontal_to_coordinate(q.e, q.n)?;
+            q = match step_plane {
+                None => project_into_disc(q, p, tighten(max_offset_m)),
+                Some((center, radius)) => {
+                    match project_into_lens(q, p, tighten(max_offset_m), center, radius) {
+                        Some(q) => q,
+                        // Limits too tight to resolve in the plane.
+                        None => break,
+                    }
+                }
+            };
+            let mut c = from_plane(q)?;
             if let Some(b) = boundary {
                 // The boundary centre may be far from the working plane, so
                 // this limit is enforced with geodesics, not in the plane.
                 let g = geographic::inverse(b.center, c)?;
-                let radius = b.radius_m * shrink;
+                let radius = tighten(b.radius_m);
                 if g.distance_m > radius {
                     c = geographic::destination(b.center, g.initial_bearing_deg, radius)?;
                     q = to_plane(c)?;
@@ -549,29 +618,39 @@ impl NoiseEngine {
             }
         }
 
-        // Fallback: head from the previous output straight towards the true
-        // position, as far as the step limit allows. By the triangle
-        // inequality this point is within the step limit, within
-        // `max_offset − rate·dt` of the true position, and (both ends being
-        // inside the boundary) inside the boundary.
+        // Fallbacks, used when the shaped candidate fails the exact check
+        // (curvature, rounding, or limits below the resolution of the
+        // geodesic computation). Each is verified like any other candidate.
         self.fallback_count += 1;
-        let c = match step {
-            None => base,
-            Some(s) => {
-                let d = geographic::distance(s.from, base)?;
-                let reach = s.max_m * shrink;
-                if d <= reach {
-                    base
-                } else {
-                    geographic::interpolate(s.from, base, reach / d)?
-                }
-            }
+        let Some(s) = step else {
+            // First sample: zero offset satisfies the offset bound, and the
+            // base was already checked against the boundary.
+            return Ok(base);
         };
-        if satisfies(c)? {
-            Ok(c)
-        } else {
-            Err(NoiseError::ConstraintUnsatisfiable)
+        // 1. A point on the geodesic from the previous output to the true
+        //    position. A fraction f of the way is within the step limit when
+        //    f·d ≤ max step, and within the offset bound when (1 − f)·d ≤
+        //    max offset; that interval is never empty (triangle inequality),
+        //    and its midpoint has the most slack against rounding. Both ends
+        //    lie inside the boundary, hence so does the segment.
+        let d = geographic::distance(s.from, base)?;
+        if d > 0.0 {
+            let lowest = (1.0 - max_offset_m / d).max(0.0);
+            let highest = (s.max_m / d).min(1.0);
+            let c = geographic::interpolate(s.from, base, 0.5 * (lowest + highest))?;
+            if satisfies(c)? {
+                return Ok(c);
+            }
         }
+        // 2. Hold the previous output (zero step), or 3. report the true
+        //    position (zero offset). One of them is exact whenever the
+        //    remaining slack is too small to resolve numerically.
+        for c in [s.from, base] {
+            if satisfies(c)? {
+                return Ok(c);
+            }
+        }
+        Err(NoiseError::ConstraintUnsatisfiable)
     }
 }
 
@@ -893,6 +972,52 @@ mod tests {
         assert!(((p.e - 1.0).hypot(p.n - 1.0) - 2.5).abs() < 1e-12);
         assert!((p.e - 2.5).abs() < 1e-12 && (p.n - 3.0).abs() < 1e-12);
         assert_eq!(project_into_disc(c, c, 0.0), c);
+    }
+
+    #[test]
+    fn projection_into_lens_is_the_nearest_point_of_the_intersection() {
+        let (c1, r1) = (V2 { e: 0.0, n: 0.0 }, 5.0);
+        let (c2, r2) = (V2 { e: 6.0, n: 0.0 }, 5.0);
+        let project = |e, n| project_into_lens(V2 { e, n }, c1, r1, c2, r2).unwrap();
+        // Already inside both.
+        assert_eq!(project(3.0, 1.0), V2 { e: 3.0, n: 1.0 });
+        // Nearest point is on one arc.
+        let p = project(-4.0, 0.0);
+        assert!((p.e - 1.0).abs() < 1e-12 && p.n.abs() < 1e-12);
+        // Nearest point is a corner of the lens: (3, ±4).
+        let p = project(3.0, 40.0);
+        assert!((p.e - 3.0).abs() < 1e-12 && (p.n - 4.0).abs() < 1e-12);
+        let p = project(20.0, -30.0);
+        assert!((p.e - 3.0).abs() < 1e-12 && (p.n + 4.0).abs() < 1e-12);
+
+        // Brute force: no point of the intersection is closer than the result.
+        let mut rng = Rng::from_seed(4);
+        for _ in 0..200 {
+            let q = V2 {
+                e: rng.uniform(-15.0, 20.0),
+                n: rng.uniform(-15.0, 15.0),
+            };
+            let best = project_into_lens(q, c1, r1, c2, r2).unwrap();
+            assert!(in_disc(best, c1, r1 + 1e-9) && in_disc(best, c2, r2 + 1e-9));
+            let best_d = (best.e - q.e).hypot(best.n - q.n);
+            for _ in 0..500 {
+                let x = V2 {
+                    e: rng.uniform(1.0, 5.0),
+                    n: rng.uniform(-4.0, 4.0),
+                };
+                if in_disc(x, c1, r1) && in_disc(x, c2, r2) {
+                    assert!((x.e - q.e).hypot(x.n - q.n) >= best_d - 1e-9);
+                }
+            }
+        }
+
+        // Disjoint or concentric discs have no answer.
+        let far = V2 { e: 100.0, n: 0.0 };
+        assert_eq!(project_into_lens(c1, c1, 1.0, far, 1.0), None);
+        assert_eq!(
+            project_into_lens(far, c1, 1.0, c1, 2.0),
+            Some(V2 { e: 1.0, n: 0.0 })
+        );
     }
 
     #[test]
