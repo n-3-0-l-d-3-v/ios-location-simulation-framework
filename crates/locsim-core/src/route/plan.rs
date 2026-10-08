@@ -123,7 +123,12 @@ struct Segment {
     h: f64,
     /// Position = c0 + c1 τ + c2 τ² + c3 τ³ for τ ∈ [0, 1], in ECEF metres.
     c: [Vec3; 4],
+    /// The same cubic read backwards, `p(1 − σ)`, with its (vanishing)
+    /// linear term exactly zero. Only meaningful when `rest_at_end`.
+    mirror: [Vec3; 4],
     stationary: bool,
+    rest_at_start: bool,
+    rest_at_end: bool,
 }
 
 /// State of the replayed trajectory at one instant.
@@ -274,15 +279,19 @@ impl RoutePlan {
                 let (v0, v1) = (scale(knots[j].v, h), scale(knots[j + 1].v, h));
                 let d = chord[j];
                 // Cubic Hermite in power form.
+                let c = [
+                    knots[j].x,
+                    v0,
+                    sub(sub(scale(d, 3.0), scale(v0, 2.0)), v1),
+                    add(add(scale(d, -2.0), v0), v1),
+                ];
                 Segment {
                     h,
-                    c: [
-                        knots[j].x,
-                        v0,
-                        sub(sub(scale(d, 3.0), scale(v0, 2.0)), v1),
-                        add(add(scale(d, -2.0), v0), v1),
-                    ],
+                    c,
+                    mirror: mirrored_at_rest(c),
                     stationary: stationary[j],
+                    rest_at_start: knots[j].v == ZERO,
+                    rest_at_end: knots[j + 1].v == ZERO,
                 }
             })
             .collect();
@@ -351,18 +360,23 @@ impl RoutePlan {
             (elapsed_ns.max(0), false)
         };
 
-        // Index of the segment containing `t_ns` (the last knot belongs to
-        // the final segment's end).
+        // Index of the segment containing `t_ns`; an exact hit on a recorded
+        // time returns the recorded point itself.
         let j = match self.knots.binary_search_by(|k| k.t_ns.cmp(&t_ns)) {
-            Ok(k) if k == last => {
-                return self.at_knot(last, self.kinematic_tail(last - 1, 1.0), complete);
+            Ok(k) => {
+                // Acceleration just after the point (just before, at the end).
+                let (segment, tau) = if k == last { (k - 1, 1.0) } else { (k, 0.0) };
+                return Ok(self.at_knot(k, &self.segments[segment], tau, complete));
             }
-            Ok(k) => return self.at_knot(k, self.kinematic_tail(k, 0.0), complete),
             Err(insert) => insert - 1,
         };
         let seg = &self.segments[j];
         let (k0, k1) = (&self.knots[j], &self.knots[j + 1]);
-        let tau = (t_ns - k0.t_ns) as f64 / (k1.t_ns - k0.t_ns) as f64;
+        let span = (k1.t_ns - k0.t_ns) as f64;
+        // Both fractions straight from the integer times: near the end of a
+        // segment `1 − tau` would lose the last nanoseconds to rounding.
+        let tau = (t_ns - k0.t_ns) as f64 / span;
+        let sigma = (k1.t_ns - t_ns) as f64 / span;
         let altitude_m = k0.altitude_m + (k1.altitude_m - k0.altitude_m) * tau;
         if seg.stationary {
             return Ok(resting(k0.coordinate, altitude_m, complete));
@@ -373,57 +387,120 @@ impl RoutePlan {
             scale(add(c[1], scale(add(c[2], scale(c[3], tau)), tau)), tau),
         );
         let (coordinate, _) = ecef_to_geodetic(position)?;
-        let (velocity, acceleration) = derivatives(seg, tau);
         Ok(moving(
             coordinate,
             altitude_m,
-            velocity,
-            acceleration,
+            motion(seg, tau, sigma),
             complete,
         ))
     }
 
-    /// Velocity and acceleration on segment `j` at parameter `tau`.
-    fn kinematic_tail(&self, j: usize, tau: f64) -> (Vec3, Vec3) {
-        derivatives(&self.segments[j], tau)
-    }
-
-    fn at_knot(
-        &self,
-        k: usize,
-        (_, acceleration): (Vec3, Vec3),
-        complete: bool,
-    ) -> Result<RouteState, GeoError> {
+    fn at_knot(&self, k: usize, seg: &Segment, tau: f64, complete: bool) -> RouteState {
         let knot = &self.knots[k];
         if knot.v == ZERO {
-            return Ok(resting(knot.coordinate, knot.altitude_m, complete));
+            return resting(knot.coordinate, knot.altitude_m, complete);
         }
         // The stored knot velocity, not the polynomial's value, so the two
         // segments meeting here report exactly the same speed and course.
-        Ok(moving(
-            knot.coordinate,
-            knot.altitude_m,
-            knot.v,
-            acceleration,
-            complete,
-        ))
+        let acceleration = scale(
+            add(scale(seg.c[2], 2.0), scale(seg.c[3], 6.0 * tau)),
+            1.0 / (seg.h * seg.h),
+        );
+        let speed = norm(knot.v);
+        let motion = Motion {
+            speed,
+            direction: knot.v,
+            acceleration: dot(knot.v, acceleration) / speed,
+            rotation: scale(cross(knot.v, acceleration), 1.0 / (speed * speed)),
+        };
+        moving(knot.coordinate, knot.altitude_m, motion, complete)
     }
 }
 
-fn derivatives(seg: &Segment, tau: f64) -> (Vec3, Vec3) {
-    let c = seg.c;
-    let velocity = scale(
-        add(
-            c[1],
-            scale(add(scale(c[2], 2.0), scale(c[3], 3.0 * tau)), tau),
-        ),
-        1.0 / seg.h,
-    );
-    let acceleration = scale(
-        add(scale(c[2], 2.0), scale(c[3], 6.0 * tau)),
-        1.0 / (seg.h * seg.h),
-    );
-    (velocity, acceleration)
+/// Velocity-level description of the trajectory at one instant.
+struct Motion {
+    speed: f64,
+    /// Any positive multiple of the velocity vector.
+    direction: Vec3,
+    /// Rate of change of speed, m/s².
+    acceleration: f64,
+    /// `V × A / |V|²` in rad/s: its component along the local vertical is
+    /// the (counter-clockwise) turn rate.
+    rotation: Vec3,
+}
+
+/// Speed, direction, tangential acceleration and rotation on a moving
+/// segment, at `tau` from its start (`sigma = 1 − tau` from its end).
+///
+/// Near a point where the trajectory is at rest the velocity `V` is the
+/// difference of terms that nearly cancel, and both `V·A/|V|` and
+/// `V × A/|V|²` divide by it. There the factored forms are used instead —
+/// `V = τ·U` leaving rest, `V = −σ·Ũ` arriving at rest — in which the small
+/// factor cancels analytically (see [`suprema`] for the algebra). They are
+/// the same functions, evaluated without the cancellation.
+fn motion(seg: &Segment, tau: f64, sigma: f64) -> Motion {
+    let h = seg.h;
+    // At rest at both ends: use whichever end is nearer.
+    if seg.rest_at_start && (!seg.rest_at_end || tau <= 0.5) {
+        let c = seg.c;
+        let u = add(scale(c[2], 2.0), scale(c[3], 3.0 * tau));
+        let a = add(scale(c[2], 2.0), scale(c[3], 6.0 * tau));
+        let size = norm(u);
+        if size == 0.0 {
+            return at_rest();
+        }
+        Motion {
+            speed: tau * size / h,
+            direction: u,
+            acceleration: dot(u, a) / (h * h * size),
+            rotation: scale(cross(c[2], c[3]), 6.0 / (h * size * size)),
+        }
+    } else if seg.rest_at_end {
+        let m = seg.mirror;
+        let u = add(scale(m[2], 2.0), scale(m[3], 3.0 * sigma));
+        let a = add(scale(m[2], 2.0), scale(m[3], 6.0 * sigma));
+        let size = norm(u);
+        if size == 0.0 {
+            return at_rest();
+        }
+        // Read backwards the velocity is σ·Ũ, so forwards it is −σ·Ũ; the
+        // second derivative is the same either way.
+        Motion {
+            speed: sigma * size / h,
+            direction: scale(u, -1.0),
+            acceleration: -dot(u, a) / (h * h * size),
+            rotation: scale(cross(m[2], m[3]), -6.0 / (h * size * size)),
+        }
+    } else {
+        let c = seg.c;
+        let v = scale(
+            add(
+                c[1],
+                scale(add(scale(c[2], 2.0), scale(c[3], 3.0 * tau)), tau),
+            ),
+            1.0 / h,
+        );
+        let a = scale(add(scale(c[2], 2.0), scale(c[3], 6.0 * tau)), 1.0 / (h * h));
+        let speed = norm(v);
+        if speed == 0.0 {
+            return at_rest();
+        }
+        Motion {
+            speed,
+            direction: v,
+            acceleration: dot(v, a) / speed,
+            rotation: scale(cross(v, a), 1.0 / (speed * speed)),
+        }
+    }
+}
+
+fn at_rest() -> Motion {
+    Motion {
+        speed: 0.0,
+        direction: ZERO,
+        acceleration: 0.0,
+        rotation: ZERO,
+    }
 }
 
 fn resting(coordinate: Coordinate, altitude_m: f64, complete: bool) -> RouteState {
@@ -438,28 +515,20 @@ fn resting(coordinate: Coordinate, altitude_m: f64, complete: bool) -> RouteStat
     }
 }
 
-fn moving(
-    coordinate: Coordinate,
-    altitude_m: f64,
-    velocity: Vec3,
-    acceleration: Vec3,
-    complete: bool,
-) -> RouteState {
-    let speed = norm(velocity);
-    if speed == 0.0 {
+fn moving(coordinate: Coordinate, altitude_m: f64, motion: Motion, complete: bool) -> RouteState {
+    if motion.speed == 0.0 {
         return resting(coordinate, altitude_m, complete);
     }
     let axes = local_axes(coordinate);
-    let course = dot(velocity, axes.east).atan2(dot(velocity, axes.north));
-    // Clockwise seen from above is positive, hence the sign.
-    let turn = -dot(axes.up, cross(velocity, acceleration)) / (speed * speed);
+    let course = dot(motion.direction, axes.east).atan2(dot(motion.direction, axes.north));
     RouteState {
         coordinate,
         altitude_m,
-        speed_mps: speed,
+        speed_mps: motion.speed,
         course_deg: Some(normalize_bearing(course.to_degrees())),
-        acceleration_mps2: dot(velocity, acceleration) / speed,
-        heading_rate_dps: turn.to_degrees(),
+        acceleration_mps2: motion.acceleration,
+        // Clockwise seen from above is positive, hence the sign.
+        heading_rate_dps: (-dot(axes.up, motion.rotation)).to_degrees(),
         complete,
     }
 }
@@ -644,7 +713,7 @@ fn analyse(source: usize, seg: &Segment, start: &Knot, end: &Knot) -> SegmentKin
         (false, true) => {
             // Read the segment backwards so that it starts at rest. Time
             // runs the other way, so acceleration and deceleration swap.
-            let m = suprema(mirrored_at_rest(c), h, true);
+            let m = suprema(seg.mirror, h, true);
             let flip = |(value, tau): (f64, f64)| (value, 1.0 - tau);
             Suprema {
                 speed: flip(m.speed),

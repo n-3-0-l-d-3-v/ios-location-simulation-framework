@@ -78,5 +78,8 @@ mod poly;
 #[cfg(test)]
 mod tests;
 
-pub use admission::{admit, RouteConstraint, RouteLimits, RouteRejection, RouteViolation};
+pub use admission::{
+    admit, RouteConstraint, RouteLimits, RouteRejection, RouteViolation, COORDINATE_RESOLUTION_M,
+    COURSE_RESOLUTION_DEG,
+};
 pub use plan::{Peak, PlanError, RoutePlan, RouteState, SegmentKinematics, MAX_SEGMENT_CHORD_M};

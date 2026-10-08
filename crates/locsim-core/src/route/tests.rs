@@ -50,7 +50,8 @@ fn walk() -> RoutePlan {
 
 const NO_LIMITS: RouteLimits = RouteLimits {
     max_speed_mps: 1e9,
-    displacement_cap: None,
+    displacement_cap_m: None,
+    update_interval_s: 1.0,
     max_acceleration_mps2: 1e9,
     max_deceleration_mps2: 1e9,
     max_heading_rate_dps: 1e9,
@@ -502,7 +503,8 @@ fn a_route_within_all_limits_is_admitted() {
     );
     let snug = RouteLimits {
         max_speed_mps: speed * 1.001,
-        displacement_cap: Some((speed * 1.001 * 0.25, 0.25)),
+        displacement_cap_m: Some(speed * 1.001 * 0.25),
+        update_interval_s: 0.25,
         max_acceleration_mps2: accel * 1.001,
         max_deceleration_mps2: decel * 1.001,
         max_heading_rate_dps: turn * 1.001,
@@ -590,7 +592,8 @@ fn displacement_cap_is_checked_per_update_interval() {
     let plan = walk();
     let (segment, speed) = worst(&plan, |k| k.peak_speed_mps.value);
     let with_cap = |cap: f64, interval: f64| RouteLimits {
-        displacement_cap: Some((cap, interval)),
+        displacement_cap_m: Some(cap),
+        update_interval_s: interval,
         ..NO_LIMITS
     };
     // At 2 Hz the fastest half-second covers speed/2 metres.
@@ -776,4 +779,35 @@ fn a_loop_seam_is_validated_like_any_other_point() {
     assert!(found
         .iter()
         .any(|v| v.constraint == RouteConstraint::TurnAtStop && v.segment == 3));
+}
+
+#[test]
+fn admission_leaves_room_for_coordinate_rounding_at_the_update_interval() {
+    // The faster the sampling, the more headroom below the speed and
+    // heading-rate limits is required: 2 × 2 nm and 1e-9° per interval.
+    let plan = walk();
+    let (_, speed) = worst(&plan, |k| k.peak_speed_mps.value);
+    let (_, turn) = worst(&plan, |k| k.peak_heading_rate_dps.value);
+    let at = |interval: f64, speed_limit: f64, turn_limit: f64| {
+        plan.violations(&RouteLimits {
+            max_speed_mps: speed_limit,
+            max_heading_rate_dps: turn_limit,
+            update_interval_s: interval,
+            ..NO_LIMITS
+        })
+    };
+    // A limit 5e-6 above the peak is enough at 1 Hz (headroom 4e-9 m/s)…
+    assert_eq!(at(1.0, speed * (1.0 + 5e-6), 1e9), vec![]);
+    // …but not at 1 MHz, where the headroom is 4e-3 m/s.
+    let found = at(1e-6, speed * (1.0 + 5e-6), 1e9);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].constraint, RouteConstraint::MaxSpeed);
+    assert!((found[0].observed / speed - 1.0).abs() < 1e-6);
+    assert_eq!(at(1e-6, speed + 0.0041, 1e9), vec![]);
+
+    assert_eq!(at(1.0, 1e9, turn * (1.0 + 5e-6)), vec![]);
+    let found = at(1e-6, 1e9, turn * (1.0 + 5e-6));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].constraint, RouteConstraint::HeadingRate);
+    assert_eq!(at(1e-6, 1e9, turn + 0.0011), vec![]);
 }

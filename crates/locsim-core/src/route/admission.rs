@@ -6,14 +6,35 @@ use crate::domain::{Boundary, Scenario, KINEMATIC_MARGIN};
 use crate::geographic::{bearing_difference, geodetic_to_ecef, wgs84};
 use std::fmt;
 
+/// Resolution of a position stored as latitude/longitude in `f64` degrees:
+/// about 1.6 nm per unit in the last place at mid longitudes.
+///
+/// The validation gate measures the distance between two emitted fixes and
+/// compares it strictly with `max speed × dt`. Each fix is rounded to this
+/// resolution, so the measured distance can exceed the true one by up to
+/// twice this. A generated model can shorten its step to compensate; a
+/// replayed route cannot move its points. Admission therefore keeps the
+/// trajectory's speed `2 × resolution / update interval` below the limit
+/// (4e-7 m/s at 100 Hz), which guarantees the gate's displacement check at
+/// the scenario's update interval or any longer one.
+pub const COORDINATE_RESOLUTION_M: f64 = 2e-9;
+
+/// Resolution of a turn measured between two fixes (two courses and a
+/// meridian convergence), in degrees. Admission keeps the trajectory's turn
+/// rate this much per update interval below the limit, for the same reason.
+pub const COURSE_RESOLUTION_DEG: f64 = 1e-9;
+
 /// The movement limits a replayed route must respect. The same quantities
 /// the final validation gate enforces on every emitted sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RouteLimits {
     pub max_speed_mps: f64,
-    /// `(cap in metres, update interval in seconds)`, when the scenario caps
-    /// the displacement per sample.
-    pub displacement_cap: Option<(f64, f64)>,
+    /// Cap on the distance covered in one update interval, if the scenario
+    /// sets one.
+    pub displacement_cap_m: Option<f64>,
+    /// The shortest interval at which the trajectory will be sampled. See
+    /// [`COORDINATE_RESOLUTION_M`] for why admission needs to know.
+    pub update_interval_s: f64,
     pub max_acceleration_mps2: f64,
     pub max_deceleration_mps2: f64,
     pub max_heading_rate_dps: f64,
@@ -25,9 +46,8 @@ impl RouteLimits {
         let m = &scenario.movement;
         Self {
             max_speed_mps: m.max_speed_mps,
-            displacement_cap: m
-                .max_displacement_per_sample_m
-                .map(|cap| (cap, scenario.update_interval_s)),
+            displacement_cap_m: m.max_displacement_per_sample_m,
+            update_interval_s: scenario.update_interval_s,
             max_acceleration_mps2: m.max_acceleration_mps2,
             max_deceleration_mps2: m.max_deceleration_mps2,
             max_heading_rate_dps: m.max_heading_rate_dps,
@@ -138,51 +158,62 @@ impl RoutePlan {
     /// segment's `surface_scale` first (see [`SegmentKinematics`]).
     pub fn violations(&self, limits: &RouteLimits) -> Vec<RouteViolation> {
         let mut out = Vec::new();
+        let interval_s = limits.update_interval_s;
+        let speed_headroom = 2.0 * COORDINATE_RESOLUTION_M / interval_s;
+        let turn_headroom = COURSE_RESOLUTION_DEG / interval_s;
         for k in self.kinematics() {
             if k.stationary {
                 continue;
             }
-            let mut check = |constraint, observed: f64, limit: f64, at_elapsed_s: f64| {
-                if exceeds(observed, limit) {
+            // `headroom` is required below the limit but is not part of the
+            // observed value that gets reported.
+            let mut check = |constraint, observed: f64, headroom: f64, limit: f64, at: f64| {
+                if exceeds(observed + headroom, limit) {
                     out.push(RouteViolation {
                         segment: k.segment,
                         constraint,
                         observed,
                         limit,
-                        at_elapsed_s,
+                        at_elapsed_s: at,
                     });
                 }
             };
             let speed = k.peak_speed_mps.value * k.surface_scale;
+            let speed_at = k.peak_speed_mps.at_elapsed_s;
             check(
                 RouteConstraint::MaxSpeed,
                 speed,
+                speed_headroom,
                 limits.max_speed_mps,
-                k.peak_speed_mps.at_elapsed_s,
+                speed_at,
             );
-            if let Some((cap_m, interval_s)) = limits.displacement_cap {
+            if let Some(cap_m) = limits.displacement_cap_m {
                 check(
                     RouteConstraint::DisplacementPerSample,
                     speed * interval_s,
+                    speed_headroom * interval_s,
                     cap_m,
-                    k.peak_speed_mps.at_elapsed_s,
+                    speed_at,
                 );
             }
             check(
                 RouteConstraint::Acceleration,
                 k.peak_acceleration_mps2.value,
+                0.0,
                 limits.max_acceleration_mps2,
                 k.peak_acceleration_mps2.at_elapsed_s,
             );
             check(
                 RouteConstraint::Deceleration,
                 k.peak_deceleration_mps2.value,
+                0.0,
                 limits.max_deceleration_mps2,
                 k.peak_deceleration_mps2.at_elapsed_s,
             );
             check(
                 RouteConstraint::HeadingRate,
                 k.peak_heading_rate_dps.value * k.surface_scale * k.surface_scale,
+                turn_headroom,
                 limits.max_heading_rate_dps,
                 k.peak_heading_rate_dps.at_elapsed_s,
             );
