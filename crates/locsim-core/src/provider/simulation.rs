@@ -4,7 +4,7 @@ use crate::domain::{
 };
 use crate::movement::{model_for, MovementError, MovementModel};
 use crate::noise::NoiseEngine;
-use crate::scheduler::{Poll, Tick, TickSchedule};
+use crate::scheduler::{Poll, ScheduleError, Tick, TickSchedule};
 use crate::validation::{SampleLimits, SampleValidator};
 
 /// Builds the movement model for a run. Replaceable so a different movement
@@ -14,6 +14,8 @@ pub type ModelFactory =
 
 /// Everything that exists only while a run is active.
 struct Run {
+    /// When the run began; the origin of simulated time.
+    started: Timestamp,
     schedule: TickSchedule,
     model: Box<dyn MovementModel + Send>,
     noise: NoiseEngine,
@@ -76,7 +78,15 @@ impl SimulationProvider {
     fn generate(&mut self, tick: Tick) -> Result<SyntheticLocation, ProviderError> {
         // Invariant: `run` is Some whenever state is Running; checked by caller.
         let run = self.run.as_mut().expect("run exists while running");
-        let base = run.model.sample_at(tick.target)?;
+        // The model runs on simulated time, `tick index × interval`, which
+        // stands still while paused; samples are stamped with wall time.
+        // Without this a pause would make every mover leap ahead on resume.
+        let simulated = i64::try_from(tick.index)
+            .ok()
+            .and_then(|n| n.checked_mul(run.schedule.interval_nanos()))
+            .and_then(|elapsed| run.started.checked_add_nanos(elapsed))
+            .ok_or(ScheduleError::Overflow)?;
+        let base = run.model.sample_at(simulated)?;
         let noisy = run.noise.apply(
             tick.target,
             &base,
@@ -115,6 +125,7 @@ impl LocationProvider for SimulationProvider {
 
         self.state = SimulationState::Starting;
         self.run = Some(Run {
+            started: now,
             schedule,
             model,
             noise,
@@ -206,7 +217,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         Coordinate, LocationError, MovementMode, MovementParameters, NoiseParameters,
-        PlaybackParameters, RotationDirection, CURRENT_SCHEMA_VERSION,
+        PlaybackParameters, RotationDirection, Route, RoutePoint, CURRENT_SCHEMA_VERSION,
     };
     use crate::geographic::GeoError;
     use crate::movement::MovementSample;
@@ -388,20 +399,66 @@ mod tests {
 
     #[test]
     fn unimplemented_modes_are_reported_not_faked() {
+        // Route replay is T06.
+        let point = |seconds: i64, lon: f64| RoutePoint {
+            timestamp: t(seconds * SEC),
+            coordinate: Coordinate::new(0.0, lon).unwrap(),
+        };
         let mut s = fixed_scenario();
-        s.mode = MovementMode::Circular;
+        s.mode = MovementMode::RouteReplay;
         s.movement.max_speed_mps = 5.0;
-        s.movement.radius_m = Some(50.0);
-        s.movement.angular_velocity_dps = Some(1.0);
-        s.movement.max_heading_rate_dps = 10.0;
+        s.route = Some(Route::new(vec![point(0, 0.0), point(10, 0.0001)]).unwrap());
         let mut p = SimulationProvider::new(s);
         assert_eq!(
             p.start(t(T0)),
             Err(ProviderError::Movement(MovementError::UnsupportedMode(
-                MovementMode::Circular
+                MovementMode::RouteReplay
             )))
         );
         assert_eq!(p.status().state, SimulationState::Idle);
+    }
+
+    fn orbit_scenario() -> Scenario {
+        let mut s = fixed_scenario();
+        s.mode = MovementMode::Circular;
+        s.movement.max_speed_mps = 5.0;
+        s.movement.max_heading_rate_dps = 10.0;
+        s.movement.radius_m = Some(50.0);
+        s.movement.angular_velocity_dps = Some(2.0);
+        s
+    }
+
+    #[test]
+    fn moving_model_runs_through_the_same_pipeline() {
+        let mut p = SimulationProvider::new(orbit_scenario());
+        p.start(t(T0)).unwrap();
+        let origin = fixed_scenario().origin;
+        for n in 0..180 {
+            let s = p.poll(t(T0 + n * SEC)).unwrap().unwrap();
+            let d = crate::geographic::distance(origin, s.coordinate).unwrap();
+            assert!((d - 50.0).abs() < 1e-6);
+            assert!(s.speed_mps.unwrap() > 1.7 && s.course_deg.is_some());
+        }
+        assert_eq!(p.status().failed_count, 0);
+    }
+
+    #[test]
+    fn simulated_time_stands_still_while_paused() {
+        let mut p = SimulationProvider::new(orbit_scenario());
+        p.start(t(T0)).unwrap();
+        let before = p.poll(t(T0)).unwrap().unwrap();
+        let second = p.poll(t(T0 + SEC)).unwrap().unwrap();
+        let one_step = crate::geographic::distance(before.coordinate, second.coordinate).unwrap();
+
+        // Pause for an hour (20 revolutions' worth of wall time).
+        p.pause(t(T0 + SEC)).unwrap();
+        let resumed = T0 + 3_601 * SEC;
+        p.resume(t(resumed)).unwrap();
+        let after = p.poll(t(resumed + SEC)).unwrap().unwrap();
+        // The timestamp jumped by the pause; the orbit advanced by one step.
+        assert_eq!(after.timestamp, t(resumed + SEC));
+        let moved = crate::geographic::distance(second.coordinate, after.coordinate).unwrap();
+        assert!((moved - one_step).abs() < 1e-6, "{moved} vs {one_step}");
     }
 
     #[test]
