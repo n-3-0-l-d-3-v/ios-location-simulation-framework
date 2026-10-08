@@ -6,7 +6,7 @@
     Simulation Manager             state machine owner, wires everything
     Scenario Engine                serialisable scenarios, versioning
     Movement Engine                fixed [implemented]; random walk / walking / driving / orbit / replay
-    Noise / Realism Engine         seeded jitter + drift, bounded
+    Noise / Realism Engine         seeded jitter + drift, bounded  [implemented]
     Geographic Engine              WGS84 geodesics, ENU            [implemented]
     Location Abstraction           LocationProvider trait          [implemented]
     Platform Adapter               C ABI + Swift → CLLocation
@@ -14,8 +14,8 @@
     Persistence / Storage          atomic writes, schema migration
 
 Cross-cutting: `domain` (canonical types) [implemented], `rng` (seeded PRNG)
-[implemented], `scheduler` [implemented], `validation` (first two stages
-implemented).
+[implemented], `scheduler` [implemented], `validation` (field, timestamp, speed,
+boundary and displacement stages implemented).
 
 Dependency rule: a layer may import only layers below it plus `domain`/`rng`.
 The platform adapter contains conversion and lifecycle code only.
@@ -79,15 +79,76 @@ dependency upgrade.
   interval is preserved and paused time is not counted as missed.
 
 ### `validation`
-`SampleValidator` is the gate in front of emission. Implemented stages: field
-validity (`SyntheticLocation::validate`) and strictly increasing timestamps.
-Rejected samples do not advance validator state. Movement-constraint,
-metadata-consistency and scenario-boundary stages are added by T05/T07.
+`SampleValidator` is the last step before emission; nothing modifies a sample
+after it. Stages: (1) field validity, (2) strictly increasing timestamps,
+(3) with `SampleLimits`: reported speed ≤ `max_speed`, position inside the
+scenario boundary, and displacement since the previous accepted sample ≤
+`(max_speed + noise.max_offset_rate) × dt`. The gate recomputes everything from
+the sample with exact geodesics and shares no state with the movement or noise
+engines, so it catches their bugs too (verified by mutation: with the noise
+engine's limits loosened and its self-check disabled, the gate rejects the
+stream). Rejected samples do not advance validator state. Acceleration and
+heading-rate stages are added by T05/T07.
 
 ### `movement`
 `MovementModel::sample_at(t)` returns a noise-free `MovementSample`. Only
 `FixedModel` exists. `model_for(scenario)` returns
 `MovementError::UnsupportedMode` for every other mode rather than faking one.
+
+### `noise`
+Position of the engine in the pipeline:
+
+    base movement → noise → assemble metadata → final validation → emit
+
+It depends only on `domain`, `geographic`, `rng` and the `MovementSample`
+type; it never sees the scheduler or the platform.
+
+Model (noise = measurement error on top of the true motion):
+- **Jitter**: per-axis first-order Gauss–Markov process with σ =
+  `position_noise_m` and correlation time `position_correlation_time_s`
+  (`ρ = exp(−dt/τ)`, so correlation depends on elapsed time, not on sample
+  count). τ = 0 gives independent high-frequency noise. Clipped at 3 σ
+  (`NOISE_CLIP_SIGMA`).
+- **Drift**: a point travelling at exactly `drift_rate_mps` between uniformly
+  drawn waypoints in a disc of radius `max_position_offset − 3 σ`.
+- **Speed / heading / accuracy**: clipped scalar Gauss–Markov channels.
+- Each component draws from its own forked random stream, so switching one on
+  never changes another's sequence. Same `(parameters, constraints, seed,
+  inputs)` ⇒ bit-identical output; `reset()` replays.
+
+Hard guarantees, each verified with exact geodesic distances before a
+position is returned:
+1. offset from the true position ≤ `max_position_offset_m`;
+2. displacement from the previous output ≤ true displacement +
+   `max_offset_rate_mps × dt`;
+3. inside the scenario boundary (`movement.radius_m` around the origin).
+
+How they are met: the candidate is projected exactly onto the intersection of
+the offset and step discs in a local tangent plane (re-anchored every 1 km),
+then pulled inside the boundary along a geodesic. If the exact check still
+fails, fallbacks are tried in order — a point on the geodesic from the previous
+output to the true position (feasible by the triangle inequality), holding the
+previous output, the true position — and if none passes the engine returns
+`ConstraintUnsatisfiable` rather than a position. `fallback_count()` exposes how
+often this happens (0 in 150 000 random samples).
+
+Design decisions worth knowing:
+- **What "maximum speed" means with noise.** A noisy fix necessarily moves
+  between samples even when the true position does not. The *reported speed
+  field* never exceeds `movement.max_speed_mps`; the *distance between
+  consecutive outputs* is bounded by `(max_speed + max_offset_rate) × dt`.
+  `max_offset_rate_mps` is therefore the knob that makes jitter physically
+  plausible at any sample rate.
+- **Metadata.** Reported speed and course are those of the underlying motion
+  plus bounded measurement noise; they are not re-derived from the jittered
+  fixes (which would turn position noise into fake velocity). A stationary
+  sample stays exactly stationary with no course; a course is dropped when
+  noisy speed reaches zero. The full consistency engine is T07.
+- **No masking.** A base position outside the boundary, or a base speed above
+  the maximum, is not "repaired" by noise: the former is an error, the latter
+  is passed through for the validation gate to reject.
+- **Identity.** With all components at zero the engine returns its input
+  unchanged, bit for bit.
 
 ### `provider`
 - `LocationProvider`: `start / stop / pause / resume / poll / current_location
@@ -95,6 +156,7 @@ metadata-consistency and scenario-boundary stages are added by T05/T07.
   current time as an argument: providers never read a clock, which is what
   makes runs reproducible and testable without sleeping.
 - `SimulationProvider`: per due tick, model → assemble → validate → emit.
+  (Since T04: model → noise → assemble → validate → emit.)
   Samples are stamped with the tick's ideal time, so the emitted stream does
   not depend on poll punctuality.
 - Failure behaviour: an invalid scenario is rejected at `start` and the
