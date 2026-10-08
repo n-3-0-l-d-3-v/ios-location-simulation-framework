@@ -19,7 +19,7 @@ pub use geodesic::{
 
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GeoError {
     Coordinate(CoordinateError),
     /// An argument was non-finite or outside its documented domain.

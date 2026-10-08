@@ -1,5 +1,5 @@
 use super::error::ConfigError;
-use super::params::{MovementMode, MovementParameters, NoiseParameters};
+use super::params::{MovementMode, MovementParameters, NoiseParameters, NOISE_CLIP_SIGMA};
 use super::time::Timestamp;
 use crate::geographic::{self, Coordinate};
 
@@ -10,6 +10,14 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 pub struct SpeedRange {
     pub min_mps: f64,
     pub max_mps: f64,
+}
+
+/// A circular geofence: every emitted position must lie within `radius_m`
+/// (geodesic) of `center`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Boundary {
+    pub center: Coordinate,
+    pub radius_m: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -120,6 +128,14 @@ impl Scenario {
         }
     }
 
+    /// The scenario's geofence, if `movement.radius_m` is set.
+    pub fn boundary(&self) -> Option<Boundary> {
+        self.movement.radius_m.map(|radius_m| Boundary {
+            center: self.origin,
+            radius_m,
+        })
+    }
+
     /// Validates the whole scenario, reporting every problem rather than
     /// only the first. A scenario must pass before a simulation may start.
     pub fn validate(&self) -> Result<(), Vec<ConfigError>> {
@@ -155,6 +171,18 @@ impl Scenario {
 
         self.movement.validate(self.mode, &mut errors);
         self.noise.validate(&mut errors);
+        // Clipped accuracy noise must not be able to drive a reported
+        // accuracy to zero or below.
+        let reach = NOISE_CLIP_SIGMA * self.noise.accuracy_noise_m;
+        let smallest = self.horizontal_accuracy_m.min(self.vertical_accuracy_m);
+        if reach.is_finite() && reach > 0.0 && smallest > 0.0 && reach >= smallest {
+            errors.push(ConfigError::new(
+                "noise.accuracy_noise_m",
+                format!(
+                    "{NOISE_CLIP_SIGMA} x accuracy noise ({reach} m) must be below the smallest                      base accuracy ({smallest} m)"
+                ),
+            ));
+        }
 
         if !self.playback.speed.is_finite() || self.playback.speed <= 0.0 {
             errors.push(ConfigError::new(
@@ -295,6 +323,30 @@ mod tests {
             fields(&s),
             ["movement.max_speed_mps", "noise.drift_rate_mps"]
         );
+    }
+
+    #[test]
+    fn boundary_follows_movement_radius() {
+        assert_eq!(scenario().boundary(), None);
+        let mut s = scenario();
+        s.movement.radius_m = Some(40.0);
+        assert_eq!(
+            s.boundary(),
+            Some(Boundary {
+                center: s.origin,
+                radius_m: 40.0
+            })
+        );
+    }
+
+    #[test]
+    fn accuracy_noise_must_leave_accuracy_positive() {
+        let mut s = scenario();
+        // Base accuracies are 5 m and 8 m; 3 x 1.6 = 4.8 m is fine.
+        s.noise.accuracy_noise_m = 1.6;
+        assert_eq!(s.validate(), Ok(()));
+        s.noise.accuracy_noise_m = 5.0 / 3.0;
+        assert_eq!(fields(&s), ["noise.accuracy_noise_m"]);
     }
 
     #[test]

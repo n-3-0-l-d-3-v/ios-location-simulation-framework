@@ -14,7 +14,7 @@ pub use params::{
     MovementMode, MovementParameters, NoiseParameters, RotationDirection, NOISE_CLIP_SIGMA,
 };
 pub use scenario::{
-    PlaybackParameters, Route, RoutePoint, Scenario, SpeedRange, CURRENT_SCHEMA_VERSION,
+    Boundary, PlaybackParameters, Route, RoutePoint, Scenario, SpeedRange, CURRENT_SCHEMA_VERSION,
 };
 pub use state::{HealthState, SimulationState};
 pub use time::Timestamp;
