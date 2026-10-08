@@ -5,7 +5,7 @@
     Control / Configuration        (T12 app, CLI)
     Simulation Manager             state machine owner, wires everything
     Scenario Engine                serialisable scenarios, versioning
-    Movement Engine                fixed [implemented]; random walk / walking / driving / orbit / replay
+    Movement Engine                fixed, random walk, walking, driving, orbit [implemented]; replay (T06)
     Noise / Realism Engine         seeded jitter + drift, bounded  [implemented]
     Geographic Engine              WGS84 geodesics, ENU            [implemented]
     Location Abstraction           LocationProvider trait          [implemented]
@@ -15,7 +15,8 @@
 
 Cross-cutting: `domain` (canonical types) [implemented], `rng` (seeded PRNG)
 [implemented], `scheduler` [implemented], `validation` (field, timestamp, speed,
-boundary and displacement stages implemented).
+boundary, displacement, acceleration, deceleration and heading-rate stages
+implemented).
 
 Dependency rule: a layer may import only layers below it plus `domain`/`rng`.
 The platform adapter contains conversion and lifecycle code only.
@@ -80,20 +81,113 @@ dependency upgrade.
 
 ### `validation`
 `SampleValidator` is the last step before emission; nothing modifies a sample
-after it. Stages: (1) field validity, (2) strictly increasing timestamps,
-(3) with `SampleLimits`: reported speed ≤ `max_speed`, position inside the
-scenario boundary, and displacement since the previous accepted sample ≤
-`(max_speed + noise.max_offset_rate) × dt`. The gate recomputes everything from
-the sample with exact geodesics and shares no state with the movement or noise
-engines, so it catches their bugs too (verified by mutation: with the noise
-engine's limits loosened and its self-check disabled, the gate rejects the
-stream). Rejected samples do not advance validator state. Acceleration and
-heading-rate stages are added by T05/T07.
+after it. It shares no state with the movement or noise engines and recomputes
+every quantity from the emitted samples with exact geodesics, so it catches
+their bugs too.
+
+| Stage | Rejects |
+|---|---|
+| Field validity | NaN/infinite values, out-of-range coordinates, negative accuracy or speed, course outside `[0, 360)`, course without motion |
+| Timestamp | not strictly after the previous accepted sample |
+| Speed | reported speed above `max_speed` |
+| Boundary | position outside `movement.radius_m` of the origin (not in circular mode, where the radius is the orbit) |
+| Displacement | moved more than `(effective max speed + noise.max_offset_rate) × dt` — teleportation |
+| Acceleration | speed rose by more than `max_acceleration × dt` |
+| Deceleration | speed fell by more than `max_deceleration × dt` |
+| Heading rate | course turned by more than `max_heading_rate × dt` |
+
+Comparisons are strict; there is no numerical tolerance. The only allowances
+are physical and come from configured noise: speed and heading noise are
+clipped at ±3 σ, so two readings may differ by 6 σ beyond the true change; and
+position noise of reach `m` can alter the convergence between two fixes by up
+to `2·m·tan(lat)/R` (unbounded at a pole, where the heading check is skipped).
+Rejected samples do not advance validator state.
+
+**Turning is measured on the surface.** A straight path changes bearing as it
+goes — tens of degrees per kilometre near a pole — so the previous course is
+first carried along the geodesic to the new fix (`Geodesic::convergence_deg`
+is added) and only the remainder counts as a turn. `convergence_deg` uses a
+half-angle formula because subtracting the two bearings of a very short line
+is ill-conditioned (each is only good to ~1e-3° for a 0.1 mm line near a pole;
+the convergence is good to 1e-9°).
+
+Mutation evidence that the gate is independent: with the noise engine's limits
+loosened, and separately with the steered model's acceleration limit, turn cap,
+fence or convergence handling broken, the pipeline tests fail because the gate
+rejects the stream.
 
 ### `movement`
-`MovementModel::sample_at(t)` returns a noise-free `MovementSample`. Only
-`FixedModel` exists. `model_for(scenario)` returns
-`MovementError::UnsupportedMode` for every other mode rather than faking one.
+`MovementModel::sample_at(t)` maps *simulated* time to a noise-free
+`MovementSample`; `kinematics()` exposes the full trajectory state (position,
+speed, heading, acceleration, heading rate). All geometry goes through the
+`geographic` geodesic primitives — no model does arithmetic on latitude or
+longitude.
+
+| Mode | Model | Nature |
+|---|---|---|
+| Fixed | `FixedModel` | stationary, unchanged since T03 |
+| Circular | `CircularModel` | closed form in elapsed time |
+| RandomWalk, Walking, Driving | `SteeredModel` | inertial mover, one step per sample |
+| RouteReplay | — | `UnsupportedMode` until T06 |
+
+**`CircularModel`.** Position at time `t` is the point at exactly `radius`
+from the centre on bearing `phase ± ω·(t − t₀)` (geodesic direct solution), so
+nothing is integrated and no drift can accumulate: after six simulated hours at
+10 Hz the radius error is below 1 µm. Course is the tangent. The orbit starts in
+steady state. The reported speed is the nominal `r·ω`; true ground speed is
+lower by about `r²/6R²` because a circle on a curved surface is shorter than
+`2πr`.
+
+**`SteeredModel`** — what is physically modelled:
+- *Speed* ramps linearly towards a target at no more than the acceleration or
+  deceleration limit, then holds. Distance covered is the exact integral of
+  that profile, so the same straight run sampled at 100 Hz or every 5 s ends
+  at the same point. A mover starts from rest, cannot jump to speed and cannot
+  stop dead.
+- *Heading* turns by at most `max_heading_rate × dt`; the mover then follows
+  the geodesic leaving on that heading, and the stored heading is the bearing
+  on arrival, so convergence is handled at any latitude and across the
+  antimeridian.
+- *Boundary.* The mover never plans to be closer to the edge than its braking
+  distance `v²/2d` along its line, and once the edge is within braking distance
+  plus two turning radii it steers towards a random direction in the inward
+  half-plane. It therefore brakes for the fence instead of being clipped at
+  it, cannot deadlock against it, and cannot wander off. The planned step is
+  re-checked with exact geodesics before use; in 150 000 random steps and
+  200 000 long-walk steps that re-check never had to shorten one.
+
+What is merely configurable (a seeded policy, not a model of people or
+traffic): the cruising speed is redrawn uniformly from `[min_speed, max_speed]`
+after an exponentially distributed hold (`speed_change_interval_s`); pauses
+start with `pause_probability` per second and last up to `max_pause_s`; the
+desired turn per step is uniform within `(1 − heading_persistence) × 180°`.
+Random walk aims for the constant speed `step_distance / update_interval` and
+never pauses. Walking and driving are the same model with different parameters
+(`MovementParameters::walking_preset()` / `driving_preset()`). There is no
+road network, lateral-acceleration limit or minimum turning radius, and
+`min_speed` bounds the cruising target only.
+
+Constraints (all in `MovementParameters`, separate from noise):
+`max_speed_mps`, `min_speed_mps`, `max_acceleration_mps2`,
+`max_deceleration_mps2`, `max_heading_rate_dps`, and
+`max_displacement_per_sample_m`. The last one is defined per nominal update
+interval and acts as an extra speed limit `cap / update_interval`
+(`effective_max_speed_mps`); after skipped ticks the allowance scales with the
+elapsed time, which is the only definition that does not conflict with the
+deceleration limit.
+
+**Margins instead of tolerances.** The gate is strict and uses different
+arithmetic from the models, so each model stays `KINEMATIC_MARGIN` (1e-6
+relative) below every limit, plus 1e-9° on turns. The property tests show the
+models reaching 0.999999 of each limit and never exceeding one. Configurations
+that sit closer than the margin to their own limit (an orbit at exactly
+`max_speed`) are rejected at validation.
+
+**Determinism.** Randomness comes from streams forked from the scenario seed
+(heading, speed, pause), separate from the noise streams, with a fixed number
+of draws per step. Same scenario, seed and timestamps ⇒ identical output.
+Behavioural decisions are made once per step, so the same seed sampled at a
+different rate is a different (equally valid) trajectory, not a refinement.
 
 ### `noise`
 Position of the engine in the pipeline:
@@ -156,6 +250,9 @@ Design decisions worth knowing:
   current time as an argument: providers never read a clock, which is what
   makes runs reproducible and testable without sleeping.
 - `SimulationProvider`: per due tick, model → assemble → validate → emit.
+  Models are sampled at *simulated* time `start + tick index × interval`,
+  which stands still while paused, so a mover resumes where it was instead
+  of leaping ahead; samples are stamped with wall time.
   (Since T04: model → noise → assemble → validate → emit.)
   Samples are stamped with the tick's ideal time, so the emitted stream does
   not depend on poll punctuality.
