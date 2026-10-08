@@ -1,5 +1,7 @@
 use super::error::ConfigError;
-use super::params::{MovementMode, MovementParameters, NoiseParameters, NOISE_CLIP_SIGMA};
+use super::params::{
+    MovementMode, MovementParameters, NoiseParameters, KINEMATIC_MARGIN, NOISE_CLIP_SIGMA,
+};
 use super::time::Timestamp;
 use crate::geographic::{self, Coordinate};
 
@@ -128,12 +130,78 @@ impl Scenario {
         }
     }
 
-    /// The scenario's geofence, if `movement.radius_m` is set.
+    /// The scenario's geofence, if `movement.radius_m` is set. In circular
+    /// mode the radius is the orbit itself, not a fence, so there is none.
     pub fn boundary(&self) -> Option<Boundary> {
+        if self.mode == MovementMode::Circular {
+            return None;
+        }
         self.movement.radius_m.map(|radius_m| Boundary {
             center: self.origin,
             radius_m,
         })
+    }
+
+    /// Speed limit after applying the per-sample displacement cap, if any.
+    pub fn effective_max_speed_mps(&self) -> f64 {
+        self.movement
+            .effective_max_speed_mps(self.update_interval_s)
+    }
+
+    /// Checks that only make sense once movement limits and the update
+    /// interval are known together.
+    fn validate_speed_budget(&self, errors: &mut Vec<ConfigError>) {
+        let m = &self.movement;
+        let interval = self.update_interval_s;
+        let usable = |v: f64| v.is_finite() && v >= 0.0;
+        if !(interval.is_finite() && interval > 0.0 && usable(m.max_speed_mps)) {
+            return; // reported elsewhere
+        }
+        let effective = self.effective_max_speed_mps();
+        let capped = matches!(m.max_displacement_per_sample_m, Some(c) if c.is_finite() && c > 0.0);
+        let moving = !matches!(self.mode, MovementMode::Fixed | MovementMode::RouteReplay);
+        if capped && moving && usable(m.min_speed_mps) && effective < m.min_speed_mps {
+            errors.push(ConfigError::new(
+                "movement.max_displacement_per_sample_m",
+                format!(
+                    "allows only {effective} m/s at this update interval, below min speed {}",
+                    m.min_speed_mps
+                ),
+            ));
+        }
+        match self.mode {
+            MovementMode::Circular => {
+                if let (Some(r), Some(w)) = (m.radius_m, m.angular_velocity_dps) {
+                    let linear = r * w.to_radians();
+                    let fits_uncapped = linear <= m.max_speed_mps * (1.0 - KINEMATIC_MARGIN);
+                    if capped && fits_uncapped && linear > effective * (1.0 - KINEMATIC_MARGIN) {
+                        errors.push(ConfigError::new(
+                            "movement.max_displacement_per_sample_m",
+                            format!(
+                                "orbit speed {linear:.3} m/s exceeds the capped speed {effective} m/s"
+                            ),
+                        ));
+                    }
+                }
+            }
+            MovementMode::RandomWalk => {
+                if let Some(step) = m.step_distance_m.filter(|s| s.is_finite() && *s > 0.0) {
+                    let nominal = step / interval;
+                    if nominal > effective || (usable(m.min_speed_mps) && nominal < m.min_speed_mps)
+                    {
+                        errors.push(ConfigError::new(
+                            "movement.step_distance_m",
+                            format!(
+                                "step distance per update interval is {nominal} m/s, outside \
+                                 [{}, {effective}] m/s",
+                                m.min_speed_mps
+                            ),
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Validates the whole scenario, reporting every problem rather than
@@ -170,6 +238,7 @@ impl Scenario {
         }
 
         self.movement.validate(self.mode, &mut errors);
+        self.validate_speed_budget(&mut errors);
         self.noise.validate(&mut errors);
         // Clipped accuracy noise must not be able to drive a reported
         // accuracy to zero or below.
@@ -337,6 +406,56 @@ mod tests {
                 radius_m: 40.0
             })
         );
+    }
+
+    #[test]
+    fn orbit_radius_is_not_a_boundary() {
+        let mut s = scenario();
+        s.mode = MovementMode::Circular;
+        s.movement.radius_m = Some(50.0);
+        s.movement.angular_velocity_dps = Some(1.0);
+        assert_eq!(s.validate(), Ok(()));
+        assert_eq!(s.boundary(), None);
+    }
+
+    #[test]
+    fn displacement_cap_is_checked_against_the_update_interval() {
+        // Walking 0.8–1.8 m/s at 1 Hz. A 1 m cap means at most 1 m/s: fine.
+        let mut s = scenario();
+        s.movement.max_displacement_per_sample_m = Some(1.0);
+        assert_eq!(s.validate(), Ok(()));
+        assert_eq!(s.effective_max_speed_mps(), 1.0);
+        // A 0.5 m cap allows only 0.5 m/s, below the minimum cruising speed.
+        s.movement.max_displacement_per_sample_m = Some(0.5);
+        assert_eq!(fields(&s), ["movement.max_displacement_per_sample_m"]);
+        // The same cap at 4 Hz allows 2 m/s again.
+        s.update_interval_s = 0.25;
+        assert_eq!(s.validate(), Ok(()));
+        assert_eq!(s.effective_max_speed_mps(), 1.8);
+
+        // An orbit that fits max speed but not the cap.
+        let mut orbit = scenario();
+        orbit.mode = MovementMode::Circular;
+        orbit.movement.min_speed_mps = 0.0;
+        orbit.movement.radius_m = Some(50.0);
+        orbit.movement.angular_velocity_dps = Some(1.0); // 0.87 m/s
+        orbit.movement.max_displacement_per_sample_m = Some(0.5);
+        assert_eq!(fields(&orbit), ["movement.max_displacement_per_sample_m"]);
+    }
+
+    #[test]
+    fn random_walk_step_must_be_a_reachable_speed() {
+        let mut s = scenario();
+        s.mode = MovementMode::RandomWalk;
+        s.movement.radius_m = Some(30.0);
+        s.movement.step_distance_m = Some(1.2); // 1.2 m/s at 1 Hz
+        assert_eq!(s.validate(), Ok(()));
+        s.movement.step_distance_m = Some(2.5);
+        assert_eq!(fields(&s), ["movement.step_distance_m"]);
+        s.movement.step_distance_m = Some(0.5);
+        assert_eq!(fields(&s), ["movement.step_distance_m"]);
+        s.update_interval_s = 0.5; // 1.0 m/s
+        assert_eq!(s.validate(), Ok(()));
     }
 
     #[test]
