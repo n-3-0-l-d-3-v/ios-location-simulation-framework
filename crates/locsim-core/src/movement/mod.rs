@@ -12,21 +12,24 @@
 //! | Fixed | [`FixedModel`] | stationary |
 //! | Circular | [`CircularModel`] | closed form in time, no accumulated state |
 //! | RandomWalk, Walking, Driving | [`SteeredModel`] | integrated speed/heading with limits |
-//! | RouteReplay | — | not implemented (T06), reported as unsupported |
+//! | RouteReplay | [`RouteModel`] | closed form in time over an admitted route |
 //!
 //! All geometry uses the `geographic` primitives (geodesic direct/inverse);
 //! no model does arithmetic on latitude/longitude.
 
 mod circular;
 mod fixed;
+mod route;
 mod steered;
 
 pub use circular::CircularModel;
 pub use fixed::FixedModel;
+pub use route::RouteModel;
 pub use steered::{Cruise, SteeredConfig, SteeredModel};
 
 use crate::domain::{Coordinate, MovementMode, Scenario, Timestamp};
 use crate::geographic::GeoError;
+use crate::route::RouteRejection;
 use std::fmt;
 
 /// Noise-free kinematic state at one instant, as handed to the noise engine.
@@ -74,6 +77,8 @@ pub enum MovementError {
     },
     /// The scenario lacks something the model needs (it was not validated).
     InvalidConfiguration(&'static str),
+    /// The scenario's route was not admitted for replay.
+    RouteRejected(RouteRejection),
 }
 
 impl fmt::Display for MovementError {
@@ -92,6 +97,7 @@ impl fmt::Display for MovementError {
             MovementError::InvalidConfiguration(what) => {
                 write!(f, "movement configuration is incomplete: {what}")
             }
+            MovementError::RouteRejected(rejection) => write!(f, "{rejection}"),
         }
     }
 }
@@ -113,6 +119,12 @@ pub trait MovementModel {
     fn kinematics(&self) -> Option<Kinematics> {
         None
     }
+
+    /// Whether the trajectory has reached an end it will not leave. Only a
+    /// finite trajectory (an open route) ever does.
+    fn is_complete(&self) -> bool {
+        false
+    }
 }
 
 /// Builds the model for an already validated scenario.
@@ -126,6 +138,6 @@ pub fn model_for(scenario: &Scenario) -> Result<Box<dyn MovementModel + Send>, M
         MovementMode::RandomWalk | MovementMode::Walking | MovementMode::Driving => {
             Ok(Box::new(SteeredModel::for_scenario(scenario)?))
         }
-        MovementMode::RouteReplay => Err(MovementError::UnsupportedMode(scenario.mode)),
+        MovementMode::RouteReplay => Ok(Box::new(RouteModel::for_scenario(scenario)?)),
     }
 }

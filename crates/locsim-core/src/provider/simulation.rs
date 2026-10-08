@@ -208,6 +208,7 @@ impl LocationProvider for SimulationProvider {
             failed_count: self.failed_count,
             missed_ticks: self.missed_ticks,
             last_sample_time: self.last.map(|s| s.timestamp),
+            trajectory_complete: self.run.as_ref().is_some_and(|r| r.model.is_complete()),
         }
     }
 }
@@ -397,24 +398,75 @@ mod tests {
         assert_eq!(p.poll(t(T0)).unwrap(), None);
     }
 
-    #[test]
-    fn unimplemented_modes_are_reported_not_faked() {
-        // Route replay is T06.
-        let point = |seconds: i64, lon: f64| {
-            RoutePoint::new(seconds * SEC, Coordinate::new(0.0, lon).unwrap())
-        };
+    fn route_scenario(points: Vec<RoutePoint>) -> Scenario {
         let mut s = fixed_scenario();
         s.mode = MovementMode::RouteReplay;
         s.movement.max_speed_mps = 5.0;
-        s.route = Some(Route::new(vec![point(0, 0.0), point(10, 0.0001)]).unwrap());
-        let mut p = SimulationProvider::new(s);
-        assert_eq!(
-            p.start(t(T0)),
-            Err(ProviderError::Movement(MovementError::UnsupportedMode(
-                MovementMode::RouteReplay
-            )))
-        );
+        s.movement.max_acceleration_mps2 = 3.0;
+        s.movement.max_deceleration_mps2 = 3.0;
+        s.movement.max_heading_rate_dps = 90.0;
+        s.route = Some(Route::new(points).unwrap());
+        s
+    }
+
+    fn point(seconds: i64, lon: f64) -> RoutePoint {
+        RoutePoint::new(seconds * SEC, Coordinate::new(0.0, lon).unwrap())
+    }
+
+    #[test]
+    fn route_replay_runs_to_completion_and_holds_the_final_point() {
+        // 11 m east in 10 s, from rest to rest.
+        let mut p = SimulationProvider::new(route_scenario(vec![point(0, 0.0), point(10, 0.0001)]));
+        p.start(t(T0)).unwrap();
+        let first = p.poll(t(T0)).unwrap().unwrap();
+        assert_eq!(first.coordinate, Coordinate::new(0.0, 0.0).unwrap());
+        assert_eq!((first.speed_mps, first.course_deg), (Some(0.0), None));
+        assert!(!p.status().trajectory_complete);
+
+        let mid = p.poll(t(T0 + 5 * SEC)).unwrap().unwrap();
+        assert!((mid.coordinate.longitude() - 0.00005).abs() < 1e-9);
+        assert!((mid.course_deg.unwrap() - 90.0).abs() < 1e-6);
+        assert!(!p.status().trajectory_complete);
+
+        let end = Coordinate::new(0.0, 0.0001).unwrap();
+        for n in 10..15 {
+            let s = p.poll(t(T0 + n * SEC)).unwrap().unwrap();
+            assert_eq!(s.coordinate, end);
+            assert_eq!((s.speed_mps, s.course_deg), (Some(0.0), None));
+            assert!(p.status().trajectory_complete);
+        }
+        // Completion is not a stop: the provider is still running.
+        assert_eq!(p.status().state, SimulationState::Running);
+        assert_eq!(p.status().failed_count, 0);
+    }
+
+    #[test]
+    fn inadmissible_route_is_rejected_at_start_with_its_violations() {
+        use crate::route::{RouteConstraint, RouteRejection};
+        // 111 m in 10 s from rest to rest peaks at 16.7 m/s: over the 5 m/s limit.
+        let mut p = SimulationProvider::new(route_scenario(vec![point(0, 0.0), point(10, 0.001)]));
+        match p.start(t(T0)) {
+            Err(ProviderError::InvalidScenario(_)) => {
+                // The scenario's own cheap check (mean speed) fires first.
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // 33 m in 10 s: mean 3.3 m/s passes the cheap check, peak 5.0 does not.
+        let mut p = SimulationProvider::new(route_scenario(vec![point(0, 0.0), point(10, 0.0003)]));
+        match p.start(t(T0)) {
+            Err(ProviderError::Movement(MovementError::RouteRejected(
+                RouteRejection::Violations(violations),
+            ))) => {
+                assert_eq!(violations.len(), 1);
+                assert_eq!(violations[0].segment, 0);
+                assert_eq!(violations[0].constraint, RouteConstraint::MaxSpeed);
+                assert!((violations[0].observed - 5.0097).abs() < 1e-3);
+                assert_eq!(violations[0].limit, 5.0);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
         assert_eq!(p.status().state, SimulationState::Idle);
+        assert!(!p.status().trajectory_complete);
     }
 
     fn orbit_scenario() -> Scenario {

@@ -92,6 +92,9 @@ pub struct ProviderStatus {
     /// Scheduler slots skipped because polling fell behind.
     pub missed_ticks: u64,
     pub last_sample_time: Option<Timestamp>,
+    /// The trajectory has reached its end (an open route arrived at its
+    /// final point). The provider keeps running and emits the held position.
+    pub trajectory_complete: bool,
 }
 
 pub trait LocationProvider {
