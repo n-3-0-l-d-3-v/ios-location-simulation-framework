@@ -27,6 +27,14 @@ pub struct Geodesic {
     pub initial_bearing_deg: f64,
     /// Bearing at the end point (direction of travel on arrival), `[0, 360)`.
     pub final_bearing_deg: f64,
+    /// Meridian convergence along the line: final minus initial bearing, in
+    /// `(-180, 180)`. A direction carried along the geodesic without turning
+    /// changes its bearing by exactly this much.
+    ///
+    /// Computed from a half-angle formula rather than by subtracting the two
+    /// bearings, so it stays accurate for arbitrarily short lines, where the
+    /// individual bearings are ill-conditioned.
+    pub convergence_deg: f64,
 }
 
 /// Vincenty series coefficients for a given u² = cos²α (a² − b²) / b².
@@ -55,6 +63,7 @@ pub fn inverse(from: Coordinate, to: Coordinate) -> Result<Geodesic, GeoError> {
         distance_m: 0.0,
         initial_bearing_deg: 0.0,
         final_bearing_deg: 0.0,
+        convergence_deg: 0.0,
     };
 
     let l = normalize_longitude(to.longitude() - from.longitude()).to_radians();
@@ -112,10 +121,18 @@ pub fn inverse(from: Coordinate, to: Coordinate) -> Result<Geodesic, GeoError> {
             if !distance_m.is_finite() || distance_m < 0.0 {
                 return Err(GeoError::NotConverged);
             }
+            // Napier's analogy on the auxiliary sphere (reduced latitudes
+            // u1, u2 and longitude difference λ), where az1 and az2 live:
+            // tan(γ/2) = sin((u1+u2)/2) · tan(λ/2) / cos((u2−u1)/2).
+            let half = 0.5 * lambda;
+            let convergence = 2.0
+                * ((0.5 * (u1 + u2)).sin() * half.sin())
+                    .atan2((0.5 * (u2 - u1)).cos() * half.cos());
             return Ok(Geodesic {
                 distance_m,
                 initial_bearing_deg: normalize_bearing(az1.to_degrees()),
                 final_bearing_deg: normalize_bearing(az2.to_degrees()),
+                convergence_deg: convergence.to_degrees(),
             });
         }
     }
@@ -404,6 +421,65 @@ mod tests {
         let total = distance(a, b).unwrap();
         assert!((distance(a, m).unwrap() - total / 2.0).abs() < 1e-5);
         assert!((distance(m, b).unwrap() - total / 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn convergence_matches_bearing_difference_and_direct() {
+        use crate::geographic::bearing_difference;
+        let mut rng = crate::rng::Rng::from_seed(0xC0);
+        for _ in 0..5_000 {
+            let a = c(rng.uniform(-89.5, 89.5), rng.uniform(-180.0, 180.0));
+            let heading = rng.uniform(0.0, 360.0);
+            let d = 10f64.powf(rng.uniform(1.0, 6.0));
+            let (b, arrival) = direct(a, heading, d).unwrap();
+            let g = inverse(a, b).unwrap();
+            // Agrees with the plain difference where that is well-conditioned…
+            let plain = bearing_difference(g.initial_bearing_deg, g.final_bearing_deg);
+            assert!(
+                (g.convergence_deg - plain).abs() < 1e-6,
+                "{a:?} {heading} {d}"
+            );
+            // …and with the direct solution's change of bearing.
+            let from_direct = bearing_difference(heading, arrival);
+            assert!((g.convergence_deg - from_direct).abs() < 1e-6);
+        }
+        // Sign: heading east in the northern hemisphere, bearing increases.
+        assert!(
+            inverse(c(60.0, 0.0), c(60.0, 10.0))
+                .unwrap()
+                .convergence_deg
+                > 0.0
+        );
+        assert!(
+            inverse(c(-60.0, 0.0), c(-60.0, 10.0))
+                .unwrap()
+                .convergence_deg
+                < 0.0
+        );
+        assert_eq!(
+            inverse(c(10.0, 20.0), c(10.0, 20.0))
+                .unwrap()
+                .convergence_deg,
+            0.0
+        );
+    }
+
+    #[test]
+    fn convergence_stays_accurate_for_sub_millimetre_lines_at_high_latitude() {
+        use crate::geographic::bearing_difference;
+        // 0.1 mm steps 1.1 km from the pole: the two bearings from `inverse`
+        // are each only good to ~1e-3°, the convergence to better than 1e-9°.
+        let a = c(89.99, 45.0);
+        for heading in [10.0, 80.0, 135.0, 250.0, 359.0] {
+            let (b, arrival) = direct(a, heading, 1e-4).unwrap();
+            let g = inverse(a, b).unwrap();
+            let expected = bearing_difference(heading, arrival);
+            assert!(
+                (g.convergence_deg - expected).abs() < 1e-9,
+                "{heading}: {} vs {expected}",
+                g.convergence_deg
+            );
+        }
     }
 
     #[test]
