@@ -5,7 +5,8 @@
     Control / Configuration        (T12 app, CLI)
     Simulation Manager             state machine owner, wires everything
     Scenario Engine                serialisable scenarios, versioning
-    Movement Engine                fixed, random walk, walking, driving, orbit [implemented]; replay (T06)
+    Movement Engine                fixed, random walk, walking, driving, orbit, route replay [implemented]
+    Route Engine                   route -> trajectory, admission  [implemented]
     Noise / Realism Engine         seeded jitter + drift, bounded  [implemented]
     Geographic Engine              WGS84 geodesics, ENU            [implemented]
     Location Abstraction           LocationProvider trait          [implemented]
@@ -128,7 +129,7 @@ longitude.
 | Fixed | `FixedModel` | stationary, unchanged since T03 |
 | Circular | `CircularModel` | closed form in elapsed time |
 | RandomWalk, Walking, Driving | `SteeredModel` | inertial mover, one step per sample |
-| RouteReplay | — | `UnsupportedMode` until T06 |
+| RouteReplay | `RouteModel` | closed form in time over an admitted route (see `route`) |
 
 **`CircularModel`.** Position at time `t` is the point at exactly `radius`
 from the centre on bearing `phase ± ω·(t − t₀)` (geodesic direct solution), so
@@ -189,10 +190,131 @@ of draws per step. Same scenario, seed and timestamps ⇒ identical output.
 Behavioural decisions are made once per step, so the same seed sampled at a
 different rate is a different (equally valid) trajectory, not a refinement.
 
+### `route`
+A recorded route is **input data, not an authority**. Three separate things
+happen to it, in three places, and none stands in for another:
+
+| | Where | Question | Failure |
+|---|---|---|---|
+| 1. Structural validation | `domain::Route::new` | Is this a recording at all? | `RouteError` naming the point |
+| 2. Admission | `route::admit`, `RoutePlan::violations` | Does the trajectory it describes respect the movement limits everywhere? | `RouteRejection` with one `RouteViolation` per broken limit per segment |
+| 3. Final per-sample validation | `validation::SampleValidator` | Is this emitted sample (after noise) valid? | `ValidationError`, provider enters `Error` |
+
+Stage 3 is the same gate every movement model passes through. It knows nothing
+about routes or admission and is not weakened for them; corrupted route output
+is rejected by the gate alone (tested without provider, noise or admission in
+the loop).
+
+**Route data model** (`domain::Route`). Ordered `RoutePoint`s, each with a
+coordinate, an optional altitude and `elapsed_ns` — *elapsed time from the
+start of the route in integer nanoseconds*, first point at zero. Not absolute
+timestamps: a route has no date, replay places it wherever the run starts, and
+that is what makes replay reproducible. `Route::from_absolute` is the one
+documented normalisation (subtract the first timestamp). Rejected, never
+repaired: fewer than two points, first point not at zero, any point not
+strictly later than its predecessor (out of order or zero duration),
+non-finite altitude, altitude on some points but not others. Invalid
+coordinates cannot be expressed (`Coordinate` is validated). A route may carry
+a name. `Route::legs()` derives distance, duration, mean speed and bearings of
+each leg from the geographic engine.
+
+**Interpolation.** Recorded points are joined by a cubic Hermite spline in
+Earth-centred Cartesian (ECEF) coordinates, evaluated at the requested time and
+dropped onto the ellipsoid with `ecef_to_geodetic`. Latitude and longitude are
+never interpolated, so the antimeridian and the poles need no special cases.
+- The trajectory passes exactly through every recorded coordinate at exactly
+  its recorded time.
+- The velocity at a recorded point is the three-point estimate from its
+  neighbours (each neighbouring leg's mean velocity weighted by the other
+  leg's duration), kept tangent to the ground, and shared by both adjoining
+  segments — so position, speed and course are continuous everywhere.
+- An open route starts from rest and comes to rest. Its first and last legs
+  are an acceleration and a braking leg; a recording that begins or ends at
+  speed will normally break the acceleration limits there and be rejected.
+- Two consecutive points with the same coordinate are a wait: at rest for
+  that leg, arriving and leaving at rest.
+- **Speed and course are derived, not recorded**: the magnitude and true
+  bearing of the interpolant's velocity at the interpolated point. A route has
+  no recorded speed or course fields.
+- Altitude is interpolated linearly in time, or is the scenario altitude.
+
+The trajectory is a function of played time alone. A different sample interval
+reads different instants of the same curve (the 20 Hz and 1 Hz streams of one
+route agree exactly wherever both sample).
+
+**Playback.** Playback speed divides every recorded time (rounded to the
+nanosecond — that rounded timeline *is* the played route); reverse playback
+reads the route from last point to first. Both are applied before
+interpolation, so the result is admitted like any other route. Violations
+always name the route's own leg index.
+
+**Time boundaries.**
+
+| Instant | Result |
+|---|---|
+| before the start | first point, at rest |
+| exactly at the start | first point, at rest (open route) |
+| between recorded points | the interpolant |
+| exactly at a recorded time | exactly the recorded coordinate |
+| exactly at the end | final point, at rest, `complete` |
+| after the end | final point held, at rest, `complete` — no extrapolation |
+
+On completion the provider keeps running and keeps emitting the held point;
+`ProviderStatus::trajectory_complete` reports it.
+
+**Looping.** Only a closed route (last coordinate exactly equal to the first)
+may loop. The velocity is then carried across the seam like at any other point
+and the seam is admitted like any other point. An open route with looping is
+rejected (`playback.looping` in scenario validation, `OpenRouteCannotLoop` in
+the engine): it would jump back to its start. A closed route without looping is
+an ordinary open route. "Nearly closed" is open; closing it would be repairing
+the input.
+
+**Admission.** For each segment the engine derives peak speed, peak
+acceleration, peak deceleration, peak heading rate, entry/exit bearings and the
+farthest distance from the boundary centre, then compares:
+
+| Constraint | Observed | Limit |
+|---|---|---|
+| `MaxSpeed` | peak speed | `max_speed` |
+| `DisplacementPerSample` | peak speed x update interval | `max_displacement_per_sample` |
+| `Acceleration` / `Deceleration` | peak rate of change of speed | `max_acceleration` / `max_deceleration` |
+| `HeadingRate` | peak turn rate while moving | `max_heading_rate` |
+| `TurnAtStop` | change of direction across a stop | `max_heading_rate` x time stopped |
+| `Boundary` | farthest point of the curve | `movement.radius_m` |
+
+`min_speed` is not enforced on a route: it bounds the cruising target of the
+generated models, and a recording may legitimately be slow or stopped.
+
+These are suprema over each whole segment, not samples. Along a segment speed
+squared, `V.A` and `|V x A|^2` are polynomials in the segment parameter, so
+speed, tangential acceleration `V.A/|V|` and turn rate `|V x A|/|V|^2` are
+bounded rigorously: a polynomial lies within the hull of its Bernstein
+coefficients, and branch-and-bound bisection closes the gap to an attained
+value to 1e-7. Where the trajectory starts or ends at rest the vanishing
+factor is cancelled analytically first. An admitted route therefore stays
+within its limits between samples at any sampling interval, which is what lets
+it pass the strict gate. A reversal through zero speed *between* recorded
+points has an unbounded turn rate and is never admitted; turning round needs a
+wait long enough to turn in.
+
+Margins, all quantified:
+- `KINEMATIC_MARGIN` (1e-6 relative) below every limit, as for generated models.
+- Ground speed can exceed the spline's speed because the curve runs slightly
+  below the surface: factor `1 + (L/R)^2` per segment (2.5e-8 at 1 km). Legs
+  longer than 100 km are rejected.
+- A fix is stored to about 2 nm (`COORDINATE_RESOLUTION_M`), so the gate may
+  measure up to 4 nm more distance between two fixes than was travelled. A
+  generated model shortens its step to compensate; a route cannot move its
+  points. Admission keeps speed `2 x resolution / update interval` below the
+  limit (4e-7 m/s at 100 Hz) and turn rate `1e-9 deg / update interval` below
+  its limit. The guarantee holds at the scenario interval or any longer one.
+
 ### `noise`
 Position of the engine in the pipeline:
 
     base movement → noise → assemble metadata → final validation → emit
+    (a replayed route is one more base movement)
 
 It depends only on `domain`, `geographic`, `rng` and the `MovementSample`
 type; it never sees the scheduler or the platform.
