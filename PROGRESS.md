@@ -1,52 +1,48 @@
 # Progress
 
 ## Current Ticket
-T07 — Consistency Engine (not started)
+T08 — Scenario System (not started)
 
 ## Status
-T00–T06 complete and tested on Windows. No iOS code exists yet.
+T00–T07 complete and tested on Windows. No iOS code exists yet.
 Repository: https://github.com/n-3-0-l-d-3-v/ios-location-simulation-framework
 
 ## Completed
-- T00 Repository bootstrap: Cargo workspace, README, LICENSE, Docs, Scripts.
-- T01 Domain model: SyntheticLocation, SimulationState (transition table),
-  HealthState, Scenario, MovementMode/Parameters, NoiseParameters,
-  PlaybackParameters, Timestamp; validation with field-level errors.
-- T02 Geographic engine: validated Coordinate, Vincenty inverse/direct,
-  interpolation, ENU frames, seeded PRNG (xoshiro256**).
-- T03 Fixed location engine: Clock, drift-free TickSchedule, SampleValidator,
-  MovementModel + FixedModel, LocationProvider + SimulationProvider.
-- T04 Noise engine: seeded Gauss–Markov jitter, drift, clipped metadata noise;
-  hard offset/displacement/boundary limits.
-- T05 Movement engine: CircularModel, SteeredModel (random walk, walking,
-  driving), Kinematics, gate stages for acceleration/deceleration/heading rate,
-  simulated time.
-- T06 Route engine:
-  - `domain::Route` redesigned as validated input data: `RoutePoint` with
-    elapsed nanoseconds from route start, optional altitude; optional route
-    name; structured `RouteError`; `from_absolute`, `is_closed`, `legs()`.
-  - `route::RoutePlan`: cubic Hermite spline in ECEF through the recorded
-    points, velocity shared at every point, rest at open ends, waits, loops
-    over closed routes, reverse and playback speed; `state_at(elapsed)` for any
-    instant; per-segment `SegmentKinematics` with certified peaks.
-  - `route::admit` / `RoutePlan::violations`: structured `RouteViolation`
-    (segment, constraint, observed, limit, time) for max speed, displacement
-    per sample, acceleration, deceleration, heading rate, turn at a stop,
-    boundary.
-  - `movement::RouteModel`: route replay as one more `MovementModel`.
-  - `MovementModel::is_complete`, `ProviderStatus::trajectory_complete`.
-  - Geographic: public `geodetic_to_ecef`, `ecef_to_geodetic`, `local_axes`.
+- T00 Repository bootstrap.
+- T01 Domain model.
+- T02 Geographic engine (Vincenty, ENU/ECEF, seeded PRNG).
+- T03 Fixed location engine (scheduler, validator, provider).
+- T04 Noise engine.
+- T05 Movement engine (circular, steered: random walk / walking / driving).
+- T06 Route engine (ECEF spline, rigorous admission, RouteModel).
+- T07 Consistency engine:
+  - `consistency::KinematicsDeriver`: speed and course derived by backward
+    difference from the emitted positions and timestamps (the authoritative
+    observation). First sample has neither; < 4 nm displacement is exactly
+    stationary; < 0.1 mm has a speed but no course; no course is carried over.
+  - `consistency::check_first` / `check_pair`: independent re-derivation that
+    rejects contradictory metadata; `ConsistencyTolerance` (3 σ of configured
+    observation noise, accuracy band).
+  - Provider pipeline: movement → noise → final position → derive → validate
+    → emit. Model/noise speed and course no longer reach the output.
+  - Gate: new consistency stage; kinematic stages restated for interval means
+    and chord directions (speed change over `(dt + dt′)/2`, course change over
+    `dt + dt′`), with physical allowances and coordinate-resolution terms.
+  - Noise engine: the offset is now slew-limited to `max_offset_rate × dt`,
+    as its parameter always documented; fence pull is the one exception and
+    the gate recognises a fix held at the fence.
+  - `geographic::COORDINATE_RESOLUTION_M` moved from the route engine.
 
 ## Current Work
 - None in flight.
 
 ## Tests
-Last full run (2026-10-09, Windows 11, rustc 1.98.1): **227 passed, 0 failed.**
+Last full run (2026-10-09, Windows 11, rustc 1.98.1): **273 passed, 0 failed.**
 `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -D warnings` clean.
 
 | Suite | Tests |
 |---|---|
-| Unit (in `src/`) | 170 |
+| Unit (in `src/`) | 202 |
 | `geographic_props` | 6 |
 | `fixed_pipeline` | 4 |
 | `noise_props` | 8 |
@@ -55,110 +51,82 @@ Last full run (2026-10-09, Windows 11, rustc 1.98.1): **227 passed, 0 failed.**
 | `moving_pipeline` | 12 |
 | `route_props` | 6 |
 | `route_pipeline` | 8 |
+| `consistency_pipeline` | 14 |
 
-T06 property-test statistics:
-- 400 random routes (open with waits, closed circuits, reverse, 0.3–3× playback,
-  near the poles and on the date line), each admitted under limits only 3e-6
-  above its own peaks: 400 admitted, 0 unbounded; 266 041 sampled instants,
-  including 1 ns either side of every recorded point; closest approach to the
-  speed / acceleration / deceleration / turn / radius limits 0.999997 of each;
-  violations 0.
-- The independent gate on the same kind of routes at three unrelated cadences
-  each (0.3 ms–10 s, regular and jittered): 1 754 106 consecutive pairs over
-  900 streams, 0 rejections.
-- Any single limit set 1 % below the route (speed, displacement, acceleration,
-  deceleration, heading rate) or 2 % (boundary): detected in 200 of 200 routes
-  each, reporting nothing else.
-- Every recorded point reproduced bit-exactly at its time, forwards and
-  reversed, for 200 random routes.
-- Provider, independently re-checked consecutive pairs: 3 194 (route without
-  noise at 0.05, 0.37, 1 and 7 s), 912 (route with noise at 0.2, 1 and 3 s),
-  600 (closed loop, 5 laps) — 4 706 in total, 0 rejections.
-- Gate independence: route output corrupted in six ways (teleport, excessive
-  speed, acceleration, deceleration, turn, boundary escape) is rejected by the
-  validator alone, with no provider, noise stage or admission involved.
-- Mutation checks, all caught (by unit tests, by the property tests and by the
-  gate): heading-rate peak under-reported by half; velocity not shared across
-  a recorded point (5 % mismatch); deceleration peak ignored on braking legs.
+T07 independently re-checked consecutive sample pairs (shared helper that
+restates the rules without using the gate or the deriver):
+- every source × {no noise, noise}, regular and jittered: 11 484
+- intervals 1 ms, 10 ms, 100 ms, 1 s, 5 s (each regular + jittered, all
+  sources, with and without noise): 40 560
+- 180 random scenarios (poles, date line, 10 ms–10 s): 51 694
+  (42 440 with a course, 8 357 stationary)
+- noisy fixed scenarios (existing suite, now re-checked): 95 658
+- Without observation noise: max |speed − distance/elapsed| = 0 and max
+  course error = 0 (bit-identical to the geodesic computation); with noise:
+  within the 3 σ reach (0.3 m/s, 12°).
+- Mutations of emitted metadata rejected by the gate, with and without noise:
+  speed ×2, speed zero while moving, course reversed, course missing, speed
+  missing, timestamp shifted, NaN/∞ speed, NaN course, accuracy inflated,
+  kinematics on a first sample, speed on a stationary fix; without noise also
+  stale course and 0.1 % speed error.
+- Engine mutation checks, all caught: speed 0.1 % high; departure bearing
+  instead of arrival bearing; carried-over course on a stationary fix;
+  consistency check disabled.
 
-Numerical issues found and fixed during T06:
-- Certified bound not actually an upper bound: the branch-and-bound returned
-  an attained value up to the gap below the true supremum. It now returns the
-  value plus the gap, so the bound is certified.
-- Search budget: bounding a ratio by bounding numerator and denominator
-  separately converges only linearly, so a 1e-9 gap needed ~30 000 intervals
-  and exhausted the budget, returning a bound 0.4 % too high. Gap set to 1e-7
-  (still ten times finer than the admission margin), budget raised.
-- Coordinate resolution: a fix is stored to ~2 nm, so a route running within
-  1e-6 of the speed limit can be measured over it at sub-millimetre steps.
-  Admission now keeps `2 × resolution / update interval` of headroom on speed
-  and `1e-9° / update interval` on turn rate.
-- Cancellation at rest: one nanosecond before a stop the reported heading rate
-  was −1757°/s where the true value is −0.82°/s. Kinematics near rest are now
-  evaluated in factored form, with both segment fractions taken from the
-  integer times.
+Performance (release build, walking scenario, per sample): whole pipeline
+≈ 1.2 µs, deriving kinematics ≈ 270 ns (≈ 23 %), final validation ≈ 310 ns.
+One geodesic inverse per derivation, no allocation, no cache beyond the
+previous emitted fix.
+
+Numerical issues found and fixed during T07:
+- Noise engine limited only the emitted step, not the offset's rate of change;
+  the emitted track could double back on a straight mover (found when derived
+  courses failed the heading stage). Offset is now slew-limited.
+- Rounding slack for `derived + noise` and for accuracy comparisons must scale
+  with the magnitude being rounded, not with the smaller difference.
+- `1 − cos(90°)` is not exactly 1 in floating point; the chord-shortfall bound
+  returns the full speed explicitly at half a turn or more.
+- At 1 kHz and above, derived speed is limited by coordinate resolution
+  (4 nm / dt); the gate adds exactly that term rather than a tolerance.
 
 ## Known Issues / Limitations
-- History: commit `7dab0a0` is titled as the provider change but also contains
-  the `movement::RouteModel` commit. The route-model commit failed its isolated
-  test run (an older provider test still expected route replay to be
-  unsupported), the gate correctly refused it, and its staged files were then
-  swept into the next commit. Both changes are tested together at that commit.
-  Earlier: `7c96eb3` and `b3b0d6e` (T05) each have one failing unit test, fixed
-  in `e318635`. History is not rewritten.
-- A realistic raw GPS log will usually be rejected: an open route must start
-  and end at rest, and receiver jitter produces accelerations and turn rates
-  beyond pedestrian or vehicle limits. There is no smoothing, resampling or
-  repair step; that would be an explicit normalisation contract, not yet
-  designed.
-- Speed and course are derived from the interpolant. A route cannot carry
-  recorded speed/course, and the spline's speed between points is not the
-  recording's (it overshoots leg mean speeds, by up to 1.5× on a rest-to-rest leg).
-- A reversal between recorded points is never admitted; turning round needs a
-  wait at a recorded point long enough to turn in.
-- Legs longer than 100 km are rejected.
-- Admission's guarantee is for the scenario's update interval or longer.
-- Altitude is interpolated linearly and is not limit-checked.
-- `min_speed` is not enforced on routes.
-- The scenario origin is only the boundary centre in route mode; the route
-  defines where the trajectory is.
-- `route_props` takes about 27 s in a debug build (1.75 million gate checks).
-- Carried over: behaviour of generated models is a seeded policy, not a model
-  of people or traffic; one model step per sample for steered models; the gate
-  skips heading checks across samples without a course; with position noise
-  the heading check is weak near a pole; reported speed/course of generated
-  models are not re-derived from noisy positions (T07); noise does not touch
-  altitude; no real-time driver; provider does not self-recover from `Error`
-  (T10); `inverse` fails for near-antipodal points; Scenario JSON is T08;
+- Gate changes to be aware of: the heading-rate stage now allows turning over
+  both intervals (`ω (dt + dt′)`), up to twice the previous `ω dt` for even
+  sampling; with position noise the speed-change stage allows `2 × offset
+  rate` and the heading stage is void when the noise step is half the chord;
+  a fix held at the fence skips both stages.
+- Speed is an interval mean, so it depends on the sampling interval; it is
+  not an instantaneous (Doppler-like) speed.
+- At very high rates derived speed is coarse (4 mm/s at 1 MHz).
+- Steps under 0.1 mm have no course, e.g. below 0.1 m/s at 1 kHz.
+- The first sample of every run has no speed or course.
+- The noise engine still computes its own noisy speed/course, now unused.
+- If the noise engine falls back (not observed in tests) the slew limit may
+  be exceeded away from the fence and the gate could reject the sample.
+- History notes carried over: `7dab0a0` bundles two changes; `7c96eb3` and
+  `b3b0d6e` each have one failing unit test fixed in `e318635`.
+- Carried over: raw GPS logs are usually not admissible as routes; behaviour
+  of generated models is a seeded policy; noise does not touch altitude; no
+  real-time driver; no self-recovery from `Error` (T10); Scenario JSON is T08;
   Docs/TESTING.md and Docs/RELIABILITY.md come with T13–T15; Rust layout
-  differs from the spec tree.
+  differs from the spec tree; nothing has run on iOS.
 
 ## Compatibility
 - Core: Verified on Windows 11 x86_64 / rustc 1.98.1 only.
 - iOS Simulator, physical devices, jailbroken devices: Untested (no adapter yet).
 
 ## Next
-- T07 Consistency engine: make the *emitted* metadata consistent with the
-  emitted positions and timestamps, after noise — speed vs displacement,
-  course vs direction of travel, accuracy vs noise — and add the matching
-  stage to the validation gate.
-- Decisions T07 must make explicitly:
-  - Reported speed is currently the model's instantaneous speed plus noise,
-    while displacement reflects the mean speed over the step plus position
-    noise. Decide which is authoritative and how far they may disagree.
-  - Position noise moves fixes without moving speed/course. Either derive
-    metadata from the noisy fixes (and accept noisier metadata) or define a
-    quantified tolerance between them.
+- T08 Scenario system: JSON import/export, schema versioning and migration,
+  example scenarios (including routes with elapsed-time points).
 - Gotchas:
-  - Gate is strict; engines keep `KINEMATIC_MARGIN` below limits, and
-    admission adds coordinate-resolution headroom.
+  - Position and timestamp are authoritative; never emit speed/course from a
+    model.
+  - Gate is strict; engines keep `KINEMATIC_MARGIN` below limits.
   - Models receive simulated time, not wall time.
-  - Gate every commit on its test result, and unstage on failure before the
-    next commit.
+  - Gate every commit on its test result; unstage on failure.
   - Shell quirk on this machine: a command containing a lone apostrophe
     anywhere (even inside a heredoc) fails to parse; put such text in a file.
 
 ## Working agreement
-- One ticket at a time; the specification is the contract, not a to-do list
-  to implement at once.
+- One ticket at a time; the specification is the contract.
 - One commit per logical change, each tested and pushed immediately.
