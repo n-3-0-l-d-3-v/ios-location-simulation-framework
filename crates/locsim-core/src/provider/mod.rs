@@ -5,6 +5,10 @@
 //! run is a pure function of (scenario, start time, poll times), and sample
 //! content does not depend on poll times at all.
 
+mod simulation;
+
+pub use simulation::{ModelFactory, SimulationProvider};
+
 use crate::domain::{
     ConfigError, InvalidTransition, SimulationState, SyntheticLocation, Timestamp,
 };
