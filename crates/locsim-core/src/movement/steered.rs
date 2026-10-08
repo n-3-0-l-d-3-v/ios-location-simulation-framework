@@ -112,6 +112,8 @@ impl Fence {
 ///   towards the centre once the edge is within braking distance plus two
 ///   turning radii. It can therefore always stop inside — it brakes for the
 ///   wall rather than being clipped at it — and it cannot wander away.
+///   When steering back it aims at a random point of the inward half-plane
+///   rather than at the centre, so a tightly fenced walk stays random.
 ///
 /// # What is merely configurable
 ///
@@ -313,7 +315,12 @@ impl SteeredModel {
                 };
                 let comfort = braking(reference) + 2.0 * turning_radius + reference * dt;
                 if room(st.heading_deg) < comfort {
-                    bearing_difference(st.heading_deg, f.centre_bearing_deg)
+                    // Aim back inside, but not at the centre itself: half
+                    // the wander keeps the aim within the inward half-plane
+                    // (so there is always room ahead) while staying random.
+                    // Aiming dead centre would make every seed trace the
+                    // same path whenever the fence is tight for the speed.
+                    bearing_difference(st.heading_deg, f.centre_bearing_deg + 0.5 * wander)
                 } else {
                     wander
                 }
