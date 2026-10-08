@@ -400,9 +400,8 @@ mod tests {
     #[test]
     fn unimplemented_modes_are_reported_not_faked() {
         // Route replay is T06.
-        let point = |seconds: i64, lon: f64| RoutePoint {
-            timestamp: t(seconds * SEC),
-            coordinate: Coordinate::new(0.0, lon).unwrap(),
+        let point = |seconds: i64, lon: f64| {
+            RoutePoint::new(seconds * SEC, Coordinate::new(0.0, lon).unwrap())
         };
         let mut s = fixed_scenario();
         s.mode = MovementMode::RouteReplay;

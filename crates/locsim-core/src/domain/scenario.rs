@@ -2,8 +2,8 @@ use super::error::ConfigError;
 use super::params::{
     MovementMode, MovementParameters, NoiseParameters, KINEMATIC_MARGIN, NOISE_CLIP_SIGMA,
 };
-use super::time::Timestamp;
-use crate::geographic::{self, Coordinate};
+use super::route::Route;
+use crate::geographic::Coordinate;
 
 /// Version of the scenario schema this build reads and writes.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -20,68 +20,6 @@ pub struct SpeedRange {
 pub struct Boundary {
     pub center: Coordinate,
     pub radius_m: f64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RoutePoint {
-    pub timestamp: Timestamp,
-    pub coordinate: Coordinate,
-}
-
-/// A recorded track: at least two points with strictly increasing timestamps.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Route {
-    points: Vec<RoutePoint>,
-}
-
-impl Route {
-    pub fn new(points: Vec<RoutePoint>) -> Result<Self, ConfigError> {
-        if points.len() < 2 {
-            return Err(ConfigError::new(
-                "route.points",
-                format!("need at least 2 points, got {}", points.len()),
-            ));
-        }
-        if let Some(i) = points
-            .windows(2)
-            .position(|w| w[1].timestamp <= w[0].timestamp)
-        {
-            return Err(ConfigError::new(
-                "route.points",
-                format!(
-                    "timestamps must strictly increase (violated at index {})",
-                    i + 1
-                ),
-            ));
-        }
-        Ok(Self { points })
-    }
-
-    pub fn points(&self) -> &[RoutePoint] {
-        &self.points
-    }
-
-    pub fn duration_s(&self) -> f64 {
-        let (first, last) = (self.points[0], self.points[self.points.len() - 1]);
-        last.timestamp.seconds_since(first.timestamp)
-    }
-
-    /// Highest point-to-point speed implied by the recording, in m/s.
-    /// Fails if a segment's geodesic cannot be computed (antipodal jump).
-    pub fn max_segment_speed_mps(&self) -> Result<f64, ConfigError> {
-        let mut max = 0.0f64;
-        for (i, w) in self.points.windows(2).enumerate() {
-            let dt = w[1].timestamp.seconds_since(w[0].timestamp);
-            let d = geographic::distance(w[0].coordinate, w[1].coordinate).map_err(|e| {
-                ConfigError::new(
-                    "route.points",
-                    format!("segment {i} is not computable: {e}"),
-                )
-            })?;
-            max = max.max(d / dt);
-        }
-        Ok(max)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -264,7 +202,17 @@ impl Scenario {
                 errors.push(ConfigError::new("route", "required for mode RouteReplay"));
             }
             (MovementMode::RouteReplay, Some(route)) => {
+                // Cheap necessary conditions only. Whether the route can be
+                // replayed within the movement limits is decided by route
+                // admission when a run starts.
                 self.validate_route_speed(route, &mut errors);
+                if self.playback.looping && !route.is_closed() {
+                    errors.push(ConfigError::new(
+                        "playback.looping",
+                        "looping needs a closed route (last point equal to the first); \
+                         an open route would jump back to its start",
+                    ));
+                }
             }
             (mode, Some(_)) => {
                 errors.push(ConfigError::new(
@@ -306,6 +254,7 @@ impl Scenario {
 mod tests {
     use super::*;
     use crate::domain::params::tests::walking;
+    use crate::domain::route::RoutePoint;
 
     fn scenario() -> Scenario {
         Scenario {
@@ -326,10 +275,7 @@ mod tests {
     }
 
     fn point(t_s: i64, lat: f64, lon: f64) -> RoutePoint {
-        RoutePoint {
-            timestamp: Timestamp::from_nanos(t_s * 1_000_000_000),
-            coordinate: Coordinate::new(lat, lon).unwrap(),
-        }
+        RoutePoint::new(t_s * 1_000_000_000, Coordinate::new(lat, lon).unwrap())
     }
 
     fn fields(s: &Scenario) -> Vec<&'static str> {
@@ -469,19 +415,6 @@ mod tests {
     }
 
     #[test]
-    fn route_construction_rules() {
-        assert!(Route::new(vec![]).is_err());
-        assert!(Route::new(vec![point(0, 0.0, 0.0)]).is_err());
-        assert!(Route::new(vec![point(5, 0.0, 0.0), point(5, 0.0, 0.1)]).is_err());
-        assert!(Route::new(vec![point(5, 0.0, 0.0), point(4, 0.0, 0.1)]).is_err());
-        let r = Route::new(vec![point(0, 0.0, 0.0), point(10, 0.0, 0.0001)]).unwrap();
-        assert_eq!(r.points().len(), 2);
-        assert_eq!(r.duration_s(), 10.0);
-        // 0.0001° of longitude on the equator ≈ 11.13 m in 10 s.
-        assert!((r.max_segment_speed_mps().unwrap() - 1.1132).abs() < 1e-3);
-    }
-
-    #[test]
     fn route_replay_requirements() {
         let replay = Scenario {
             mode: MovementMode::RouteReplay,
@@ -523,6 +456,27 @@ mod tests {
             }),
             ["route.points"]
         );
+
+        // Looping an open route would teleport back to the start.
+        let open_loop = Scenario {
+            playback: PlaybackParameters {
+                looping: true,
+                ..PlaybackParameters::REAL_TIME
+            },
+            ..ok.clone()
+        };
+        assert_eq!(fields(&open_loop), ["playback.looping"]);
+        let closed = Route::new(vec![
+            point(0, 0.0, 0.0),
+            point(10, 0.0, 0.0001),
+            point(20, 0.0, 0.0),
+        ])
+        .unwrap();
+        let closed_loop = Scenario {
+            route: Some(closed),
+            ..open_loop
+        };
+        assert_eq!(closed_loop.validate(), Ok(()));
 
         // A route on a non-replay scenario is a configuration mistake.
         assert_eq!(
