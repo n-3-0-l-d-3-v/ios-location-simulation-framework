@@ -10,7 +10,9 @@ mod time;
 pub use crate::geographic::Coordinate;
 pub use error::{ConfigError, InvalidTransition, LocationError};
 pub use location::{LocationSource, SyntheticLocation};
-pub use params::{MovementMode, MovementParameters, NoiseParameters, RotationDirection};
+pub use params::{
+    MovementMode, MovementParameters, NoiseParameters, RotationDirection, NOISE_CLIP_SIGMA,
+};
 pub use scenario::{
     PlaybackParameters, Route, RoutePoint, Scenario, SpeedRange, CURRENT_SCHEMA_VERSION,
 };

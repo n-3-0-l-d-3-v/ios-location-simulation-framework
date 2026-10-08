@@ -205,6 +205,10 @@ impl MovementParameters {
     }
 }
 
+/// Gaussian noise components are clipped at this many standard deviations,
+/// which is what makes every noise channel strictly bounded.
+pub const NOISE_CLIP_SIGMA: f64 = 3.0;
+
 /// Measurement-noise configuration. Standard deviations are 1-σ; a value of
 /// zero disables that component.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -218,6 +222,13 @@ pub struct NoiseParameters {
     pub accuracy_noise_m: f64,
     /// Low-frequency drift speed (metres per second).
     pub drift_rate_mps: f64,
+    /// Correlation time of the jitter and of the speed/heading/accuracy
+    /// noise (first-order Gauss–Markov). 0 = uncorrelated from sample to sample.
+    pub position_correlation_time_s: f64,
+    /// Hard limit on how fast the position offset may change (m/s). The
+    /// noisy output can therefore never move more than
+    /// `true displacement + max_offset_rate_mps × dt` between two samples.
+    pub max_offset_rate_mps: f64,
 }
 
 impl NoiseParameters {
@@ -229,7 +240,14 @@ impl NoiseParameters {
         heading_noise_deg: 0.0,
         accuracy_noise_m: 0.0,
         drift_rate_mps: 0.0,
+        position_correlation_time_s: 0.0,
+        max_offset_rate_mps: 0.0,
     };
+
+    /// Whether any component moves the reported position.
+    pub fn has_position_noise(&self) -> bool {
+        self.position_noise_m > 0.0 || self.drift_rate_mps > 0.0
+    }
 
     pub fn validate(&self, errors: &mut Vec<ConfigError>) {
         let pos = finite_non_negative("noise.position_noise_m", self.position_noise_m, errors);
@@ -242,12 +260,50 @@ impl NoiseParameters {
         finite_non_negative("noise.heading_noise_deg", self.heading_noise_deg, errors);
         finite_non_negative("noise.accuracy_noise_m", self.accuracy_noise_m, errors);
         let drift = finite_non_negative("noise.drift_rate_mps", self.drift_rate_mps, errors);
-        let has_position_noise = self.position_noise_m > 0.0 || self.drift_rate_mps > 0.0;
-        if pos && bound && drift && has_position_noise && self.max_position_offset_m == 0.0 {
+        finite_non_negative(
+            "noise.position_correlation_time_s",
+            self.position_correlation_time_s,
+            errors,
+        );
+        let rate = finite_non_negative(
+            "noise.max_offset_rate_mps",
+            self.max_offset_rate_mps,
+            errors,
+        );
+        if !(pos && bound && drift && rate) || !self.has_position_noise() {
+            return;
+        }
+        if self.max_position_offset_m == 0.0 {
             errors.push(ConfigError::new(
                 "noise.max_position_offset_m",
                 "must be > 0 when position noise or drift is enabled",
             ));
+        }
+        if self.max_offset_rate_mps == 0.0 {
+            errors.push(ConfigError::new(
+                "noise.max_offset_rate_mps",
+                "must be > 0 when position noise or drift is enabled",
+            ));
+        }
+        if self.drift_rate_mps > 0.0 {
+            if self.max_offset_rate_mps > 0.0 && self.drift_rate_mps > self.max_offset_rate_mps {
+                errors.push(ConfigError::new(
+                    "noise.drift_rate_mps",
+                    format!(
+                        "drift rate {} m/s exceeds max offset rate {} m/s",
+                        self.drift_rate_mps, self.max_offset_rate_mps
+                    ),
+                ));
+            }
+            let jitter_reach = NOISE_CLIP_SIGMA * self.position_noise_m;
+            if self.max_position_offset_m > 0.0 && self.max_position_offset_m <= jitter_reach {
+                errors.push(ConfigError::new(
+                    "noise.max_position_offset_m",
+                    format!(
+                        "leaves no room for drift: must exceed {NOISE_CLIP_SIGMA} x position noise                          ({jitter_reach} m)"
+                    ),
+                ));
+            }
         }
     }
 }
@@ -412,8 +468,51 @@ pub(crate) mod tests {
             ..NoiseParameters::NONE
         };
         unbounded.validate(&mut e);
-        assert_eq!(e.len(), 1);
-        assert_eq!(e[0].field, "noise.max_position_offset_m");
+        let fields: Vec<_> = e.iter().map(|e| e.field).collect();
+        assert_eq!(
+            fields,
+            ["noise.max_position_offset_m", "noise.max_offset_rate_mps"]
+        );
+
+        e.clear();
+        let jitter = NoiseParameters {
+            max_position_offset_m: 10.0,
+            max_offset_rate_mps: 5.0,
+            position_correlation_time_s: 4.0,
+            ..unbounded
+        };
+        assert!(jitter.has_position_noise());
+        jitter.validate(&mut e);
+        assert!(e.is_empty(), "{e:?}");
+
+        // Drift faster than the offset may move, and no room left beside jitter.
+        let drift = NoiseParameters {
+            drift_rate_mps: 6.0,
+            max_position_offset_m: 6.0,
+            ..jitter
+        };
+        drift.validate(&mut e);
+        let fields: Vec<_> = e.iter().map(|e| e.field).collect();
+        assert_eq!(
+            fields,
+            ["noise.drift_rate_mps", "noise.max_position_offset_m"]
+        );
+
+        e.clear();
+        let bad_time = NoiseParameters {
+            position_correlation_time_s: -1.0,
+            max_offset_rate_mps: f64::NAN,
+            ..NoiseParameters::NONE
+        };
+        bad_time.validate(&mut e);
+        let fields: Vec<_> = e.iter().map(|e| e.field).collect();
+        assert_eq!(
+            fields,
+            [
+                "noise.position_correlation_time_s",
+                "noise.max_offset_rate_mps"
+            ]
+        );
 
         e.clear();
         let bad = NoiseParameters {
