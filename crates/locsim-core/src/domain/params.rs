@@ -42,7 +42,27 @@ pub struct MovementParameters {
     /// Angular velocity for circular mode, degrees per second.
     pub angular_velocity_dps: Option<f64>,
     pub direction: RotationDirection,
+    /// Circular mode: bearing from the centre to the starting point, degrees.
+    pub start_phase_deg: f64,
+    /// Walking/driving: mean time a cruising speed is held before a new one
+    /// is drawn from `[min_speed, max_speed]`. 0 keeps the first one forever.
+    pub speed_change_interval_s: f64,
+    /// Optional cap on the distance moved in one nominal update interval.
+    /// It acts as an additional speed limit of `cap / update_interval`; see
+    /// [`MovementParameters::effective_max_speed_mps`].
+    pub max_displacement_per_sample_m: Option<f64>,
 }
+
+/// Relative headroom the movement models keep below every configured limit
+/// (speed, acceleration, deceleration, heading rate, boundary radius).
+///
+/// The final validation gate is strict and recomputes each quantity from the
+/// emitted samples with its own arithmetic, so a model that used a limit
+/// exactly would be rejected by rounding alone. The largest rounding effects
+/// measured in the test-suite are ~1e-9 relative; this leaves three orders
+/// of magnitude. Configurations that sit closer than this to a limit of
+/// their own (an orbit at exactly the maximum speed) are rejected up front.
+pub const KINEMATIC_MARGIN: f64 = 1e-6;
 
 fn finite_non_negative(field: &'static str, v: f64, errors: &mut Vec<ConfigError>) -> bool {
     if !v.is_finite() {
@@ -94,6 +114,63 @@ fn required_positive(
 }
 
 impl MovementParameters {
+    /// Pedestrian preset: ~3–6.5 km/h, gentle acceleration, quick turns,
+    /// occasional short pauses. A starting point to edit, not a hidden default.
+    pub fn walking_preset() -> Self {
+        Self {
+            min_speed_mps: 0.8,
+            max_speed_mps: 1.8,
+            max_acceleration_mps2: 0.8,
+            max_deceleration_mps2: 1.2,
+            max_heading_rate_dps: 60.0,
+            radius_m: None,
+            step_distance_m: None,
+            heading_persistence: 0.9,
+            pause_probability: 0.01,
+            max_pause_s: 20.0,
+            angular_velocity_dps: None,
+            direction: RotationDirection::Clockwise,
+            start_phase_deg: 0.0,
+            speed_change_interval_s: 30.0,
+            max_displacement_per_sample_m: None,
+        }
+    }
+
+    /// Road-vehicle preset: 18–108 km/h, car-like acceleration and braking,
+    /// slow heading changes, occasional longer stops.
+    pub fn driving_preset() -> Self {
+        Self {
+            min_speed_mps: 5.0,
+            max_speed_mps: 30.0,
+            max_acceleration_mps2: 2.5,
+            max_deceleration_mps2: 4.5,
+            max_heading_rate_dps: 25.0,
+            radius_m: None,
+            step_distance_m: None,
+            heading_persistence: 0.97,
+            pause_probability: 0.005,
+            max_pause_s: 45.0,
+            angular_velocity_dps: None,
+            direction: RotationDirection::Clockwise,
+            start_phase_deg: 0.0,
+            speed_change_interval_s: 60.0,
+            max_displacement_per_sample_m: None,
+        }
+    }
+
+    /// The speed limit that actually applies: `max_speed_mps`, further
+    /// reduced by `max_displacement_per_sample_m / update_interval_s` when a
+    /// displacement cap is set. Between two samples separated by `dt` the
+    /// true position may therefore move at most `effective_max_speed × dt`
+    /// (after missed ticks or a pause `dt` spans several intervals and the
+    /// allowance scales with it).
+    pub fn effective_max_speed_mps(&self, update_interval_s: f64) -> f64 {
+        match self.max_displacement_per_sample_m {
+            Some(cap) => self.max_speed_mps.min(cap / update_interval_s),
+            None => self.max_speed_mps,
+        }
+    }
+
     /// Appends every problem found for `mode` to `errors`.
     pub fn validate(&self, mode: MovementMode, errors: &mut Vec<ConfigError>) {
         use MovementMode::*;
@@ -141,6 +218,20 @@ impl MovementParameters {
         if let Some(w) = self.angular_velocity_dps {
             positive("movement.angular_velocity_dps", w, errors);
         }
+        if let Some(cap) = self.max_displacement_per_sample_m {
+            positive("movement.max_displacement_per_sample_m", cap, errors);
+        }
+        finite_non_negative(
+            "movement.speed_change_interval_s",
+            self.speed_change_interval_s,
+            errors,
+        );
+        if !self.start_phase_deg.is_finite() {
+            errors.push(ConfigError::new(
+                "movement.start_phase_deg",
+                "must be finite",
+            ));
+        }
 
         let moving = matches!(mode, RandomWalk | Walking | Driving | Circular);
         if moving && max_ok && self.max_speed_mps == 0.0 {
@@ -149,17 +240,19 @@ impl MovementParameters {
                 format!("must be > 0 for mode {mode:?}"),
             ));
         }
+        if mode == RandomWalk {
+            if self.radius_m.is_none() {
+                required_positive("movement.radius_m", None, mode, errors);
+            }
+            if self.step_distance_m.is_none() {
+                required_positive("movement.step_distance_m", None, mode, errors);
+            }
+        }
         match mode {
             Fixed | RouteReplay => {}
-            RandomWalk => {
-                if self.radius_m.is_none() {
-                    required_positive("movement.radius_m", None, mode, errors);
-                }
-                if self.step_distance_m.is_none() {
-                    required_positive("movement.step_distance_m", None, mode, errors);
-                }
-            }
-            Walking | Driving => {
+            // Every self-propelled model starts from rest and steers, so it
+            // needs non-zero dynamics.
+            RandomWalk | Walking | Driving => {
                 if self.max_acceleration_mps2 == 0.0 {
                     errors.push(ConfigError::new(
                         "movement.max_acceleration_mps2",
@@ -190,12 +283,24 @@ impl MovementParameters {
                 };
                 if let (Some(r), Some(w), true) = (radius, omega, max_ok) {
                     let linear = r * w.to_radians();
-                    if linear > self.max_speed_mps {
+                    if linear > self.max_speed_mps * (1.0 - KINEMATIC_MARGIN) {
                         errors.push(ConfigError::new(
                             "movement.angular_velocity_dps",
                             format!(
                                 "orbit speed {linear:.3} m/s exceeds max speed {} m/s",
                                 self.max_speed_mps
+                            ),
+                        ));
+                    }
+                }
+                // An orbit turns at its angular velocity.
+                if let Some(w) = omega {
+                    let limit = self.max_heading_rate_dps;
+                    if limit.is_finite() && w > limit * (1.0 - KINEMATIC_MARGIN) {
+                        errors.push(ConfigError::new(
+                            "movement.max_heading_rate_dps",
+                            format!(
+                                "orbit turns at {w} deg/s, above the heading-rate limit {limit}"
                             ),
                         ));
                     }
@@ -326,7 +431,82 @@ pub(crate) mod tests {
             max_pause_s: 20.0,
             angular_velocity_dps: None,
             direction: RotationDirection::Clockwise,
+            start_phase_deg: 0.0,
+            speed_change_interval_s: 30.0,
+            max_displacement_per_sample_m: None,
         }
+    }
+
+    #[test]
+    fn presets_are_valid_and_driving_is_substantially_faster() {
+        let (w, d) = (
+            MovementParameters::walking_preset(),
+            MovementParameters::driving_preset(),
+        );
+        assert!(errors_for(w, MovementMode::Walking).is_empty());
+        assert!(errors_for(d, MovementMode::Driving).is_empty());
+        assert!(d.max_speed_mps > 10.0 * w.max_speed_mps);
+        assert!(d.max_acceleration_mps2 > 3.0 * w.max_acceleration_mps2);
+        assert!(d.max_deceleration_mps2 > 3.0 * w.max_deceleration_mps2);
+    }
+
+    #[test]
+    fn displacement_cap_lowers_the_effective_speed_limit() {
+        let mut p = walking();
+        assert_eq!(p.effective_max_speed_mps(0.5), 1.8);
+        p.max_displacement_per_sample_m = Some(0.5);
+        assert_eq!(p.effective_max_speed_mps(0.5), 1.0);
+        assert_eq!(p.effective_max_speed_mps(0.1), 1.8);
+    }
+
+    #[test]
+    fn new_fields_are_validated() {
+        let p = MovementParameters {
+            max_displacement_per_sample_m: Some(0.0),
+            speed_change_interval_s: -1.0,
+            start_phase_deg: f64::NAN,
+            ..walking()
+        };
+        assert_eq!(
+            errors_for(p, MovementMode::Walking),
+            [
+                "movement.max_displacement_per_sample_m",
+                "movement.speed_change_interval_s",
+                "movement.start_phase_deg"
+            ]
+        );
+    }
+
+    #[test]
+    fn random_walk_needs_dynamics_too() {
+        let p = MovementParameters {
+            radius_m: Some(25.0),
+            step_distance_m: Some(1.0),
+            max_acceleration_mps2: 0.0,
+            max_heading_rate_dps: 0.0,
+            ..walking()
+        };
+        assert_eq!(
+            errors_for(p, MovementMode::RandomWalk),
+            [
+                "movement.max_acceleration_mps2",
+                "movement.max_heading_rate_dps"
+            ]
+        );
+    }
+
+    #[test]
+    fn orbit_must_fit_the_heading_rate_limit() {
+        let p = MovementParameters {
+            radius_m: Some(1.0),
+            angular_velocity_dps: Some(50.0),
+            max_heading_rate_dps: 45.0,
+            ..walking()
+        };
+        assert_eq!(
+            errors_for(p, MovementMode::Circular),
+            ["movement.max_heading_rate_dps"]
+        );
     }
 
     fn errors_for(p: MovementParameters, mode: MovementMode) -> Vec<&'static str> {

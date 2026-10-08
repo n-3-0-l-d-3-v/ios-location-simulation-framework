@@ -11,7 +11,8 @@ pub use crate::geographic::Coordinate;
 pub use error::{ConfigError, InvalidTransition, LocationError};
 pub use location::{LocationSource, SyntheticLocation};
 pub use params::{
-    MovementMode, MovementParameters, NoiseParameters, RotationDirection, NOISE_CLIP_SIGMA,
+    MovementMode, MovementParameters, NoiseParameters, RotationDirection, KINEMATIC_MARGIN,
+    NOISE_CLIP_SIGMA,
 };
 pub use scenario::{
     Boundary, PlaybackParameters, Route, RoutePoint, Scenario, SpeedRange, CURRENT_SCHEMA_VERSION,

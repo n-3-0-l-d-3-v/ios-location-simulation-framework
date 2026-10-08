@@ -240,6 +240,9 @@ mod tests {
                 max_pause_s: 0.0,
                 angular_velocity_dps: None,
                 direction: RotationDirection::Clockwise,
+                start_phase_deg: 0.0,
+                speed_change_interval_s: 0.0,
+                max_displacement_per_sample_m: None,
             },
             noise: NoiseParameters::NONE,
             horizontal_accuracy_m: 5.0,
@@ -390,6 +393,7 @@ mod tests {
         s.movement.max_speed_mps = 5.0;
         s.movement.radius_m = Some(50.0);
         s.movement.angular_velocity_dps = Some(1.0);
+        s.movement.max_heading_rate_dps = 10.0;
         let mut p = SimulationProvider::new(s);
         assert_eq!(
             p.start(t(T0)),
