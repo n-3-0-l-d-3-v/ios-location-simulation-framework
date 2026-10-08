@@ -19,6 +19,11 @@ pub use geodesic::{
 
 use std::fmt;
 
+/// Resolution of a position stored as latitude/longitude in `f64` degrees:
+/// about 1.6 nm per unit in the last place at mid longitudes, up to 3.2 nm
+/// at the antimeridian. Any quantity derived from stored fixes inherits it.
+pub const COORDINATE_RESOLUTION_M: f64 = 2e-9;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GeoError {
     Coordinate(CoordinateError),

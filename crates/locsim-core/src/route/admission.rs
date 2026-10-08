@@ -6,8 +6,7 @@ use crate::domain::{Boundary, Scenario, KINEMATIC_MARGIN};
 use crate::geographic::{bearing_difference, geodetic_to_ecef, wgs84};
 use std::fmt;
 
-/// Resolution of a position stored as latitude/longitude in `f64` degrees:
-/// about 1.6 nm per unit in the last place at mid longitudes.
+/// Re-exported from the geographic engine.
 ///
 /// The validation gate measures the distance between two emitted fixes and
 /// compares it strictly with `max speed × dt`. Each fix is rounded to this
@@ -17,7 +16,7 @@ use std::fmt;
 /// trajectory's speed `2 × resolution / update interval` below the limit
 /// (4e-7 m/s at 100 Hz), which guarantees the gate's displacement check at
 /// the scenario's update interval or any longer one.
-pub const COORDINATE_RESOLUTION_M: f64 = 2e-9;
+pub use crate::geographic::COORDINATE_RESOLUTION_M;
 
 /// Resolution of a turn measured between two fixes (two courses and a
 /// meridian convergence), in degrees. Admission keeps the trajectory's turn
