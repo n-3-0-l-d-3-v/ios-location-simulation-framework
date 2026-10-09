@@ -1,0 +1,204 @@
+# Ticket history: T00–T07
+
+What each completed ticket was for, what it built, what it decided, how it
+was tested, what it left open, and which commits it consists of.
+
+How to read the evidence:
+
+- **Commits** are verified: every hash below is in `git log` on `main` as of
+  2026-10-09. `git show <hash>` is the authority on what a commit contains.
+- **Test counts at the close of each ticket** are *reported*: taken from
+  `PROGRESS.md` as written at the time, not re-run at those commits. Only the
+  final count (273 at `1be8852`) was re-run when this file was written.
+- **Statistics** (pairs re-checked, closest approach to a limit, and so on)
+  are *reported* from test output. They are printed by the tests themselves
+  and can be reproduced with `cargo test -- --nocapture`.
+
+The detailed mechanics of each module are in
+[../ARCHITECTURE.md](../ARCHITECTURE.md); the reasons are in
+[ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md). This file does not
+repeat them.
+
+---
+
+## T00 — Repository bootstrap · T01 — Domain model · T02 — Geographic engine
+
+Delivered together in one commit. That was before the "one commit per logical
+change" agreement, which the project owner asked for immediately afterwards.
+
+- **Purpose.** Establish the repository, the canonical types, and correct
+  WGS84 geometry.
+- **Built.** Cargo workspace; README, LICENSE (MIT), `Docs/ARCHITECTURE.md`,
+  `Docs/COMPATIBILITY.md`, `Docs/DEVELOPMENT.md`, `Scripts/`. Domain:
+  `SyntheticLocation`, `Scenario`, `MovementMode`, `MovementParameters`,
+  `NoiseParameters`, `Route`, `PlaybackParameters`, `SimulationState` with a
+  transition table, `HealthState`, `Timestamp`, field-level `ConfigError`.
+  Geographic: validated `Coordinate`, Vincenty inverse/direct, interpolation,
+  radius and velocity helpers, ENU frames. A seeded PRNG (xoshiro256**).
+- **Key decisions.** Rust core with no dependencies (D1). Validated types
+  (D2). Errors for non-convergent geodesics (D3). Integer-nanosecond time.
+- **Found by tests.** Vincenty with an absolute convergence tolerance returns
+  the uncorrected first iterate for millimetre lines; made relative. A test
+  wrongly expected `f64` epoch seconds to resolve nanoseconds.
+- **Tests at close (reported).** 49 unit + 6 property = 55.
+- **Left open.** Antipodal pairs unsupported. `HealthState`,
+  `SimulationState::Recovering` and `Route` existed as types with nothing
+  using them yet.
+- **Commits.** `bca95b5` (T00–T02), `3cfbb3b` (LF line endings).
+
+## T03 — Fixed location engine
+
+- **Purpose.** The first complete pipeline: a stationary position through a
+  scheduler, a lifecycle and a validation gate.
+- **Built.** `Clock`, `SystemClock`, `ManualClock`; drift-free `TickSchedule`
+  with missed-tick counting and pause/resume; `SampleValidator` (field
+  validity, timestamp order); `MovementModel` and `FixedModel`;
+  `LocationProvider` and `SimulationProvider` with `ModelFactory`.
+- **Key decisions.** Time is passed in, nothing sleeps (D4). Samples are
+  stamped with the tick's ideal time. A rejected configuration leaves the
+  provider idle; a failed sample puts it in `Error`.
+- **Tests at close (reported).** 86 (76 unit, 6 geographic, 4 pipeline).
+  Mutation: stamping ticks with poll time is caught.
+- **Left open.** No real-time driver. No recovery from `Error`.
+- **Commits.** `c3db4d5`, `7717f3d`, `06e8563`, `c5ce12b`, `ec1d186`,
+  `7fbf771`, `2f61e2f`, `430fa66`, `f239411`.
+
+## T04 — Noise engine
+
+- **Purpose.** Bounded, seeded, temporally correlated measurement noise, kept
+  separate from movement and from the gate.
+- **Built.** `NoiseEngine`: Gauss–Markov jitter, constant-rate waypoint drift,
+  clipped speed/heading/accuracy channels, independent random streams, exact
+  geodesic verification of offset, step and boundary, a fallback chain, an
+  error rather than an out-of-limit position. New parameters
+  `position_correlation_time_s`, `max_offset_rate_mps`. `Scenario::boundary`.
+  Gate stages for speed, boundary and displacement. Pipeline became
+  movement → noise → validate → emit.
+- **Key decisions.** Noise is measurement error on true motion (D8). The gate
+  is independent of the engines (D11).
+- **Found by tests.** A 12 µm mismatch between projecting onto a tangent plane
+  and dropping back onto the ellipsoid forced the fallback on about 1.4 % of
+  moving samples. Projecting onto two discs in turn is not a projection onto
+  their intersection. A purely relative margin vanishes for tiny limits.
+- **Tests at close (reported).** 120.
+- **Left open.** Noise does not touch altitude. Speed and course were the
+  model's plus noise, not derived from positions — superseded in T07. Noise
+  on a moving base was tested only at engine level until T05.
+- **Latent defect, found in T07.** Only the emitted step was rate-limited, not
+  the offset, although the parameter's documentation promised the latter.
+- **Commits.** `8c34d85`, `ca6940a`, `1ecb706`, `82e6589`, `70b22f5`,
+  `bd28af1`, `51b53a9`, `db8a675`, `1c96820`, `a4f2a13`.
+
+## T05 — Movement engine
+
+- **Purpose.** Coherent trajectories: bounded random walk, walking, driving,
+  circular; with speed, acceleration, deceleration, heading-rate and
+  displacement constraints.
+- **Built.** `CircularModel` (closed form). `SteeredModel` (inertial mover
+  behind three modes). `Kinematics`. Parameters
+  `max_displacement_per_sample_m`, `speed_change_interval_s`,
+  `start_phase_deg`; `walking_preset`, `driving_preset`; `KINEMATIC_MARGIN`.
+  `Geodesic::convergence_deg`. Gate stages for acceleration, deceleration and
+  heading rate, with turning measured on the surface. Models driven on
+  simulated time.
+- **Key decisions.** One steered model, behaviour as a seeded policy (D6).
+  Displacement cap as a speed cap (D7). Simulated time (D5). Margins instead
+  of tolerances.
+- **Found by tests.** Bearings of very short lines are too ill-conditioned for
+  a strict heading check; hence `convergence_deg`. Steering at the exact
+  centre of a tight fence made every seed trace the same path.
+- **Tests at close (reported).** 176. Steered models reached 0.999999 of each
+  limit with zero violations over 150 000 random steps; 600 random scenarios
+  through the provider with zero rejections.
+- **Left open.** No road network, lateral-acceleration limit or minimum
+  turning radius. One model step per sample. `min_speed` bounds the cruising
+  target only.
+- **Mistake.** Commits `7c96eb3` and `b3b0d6e` each have one failing unit
+  test (`unimplemented_modes_are_reported_not_faked` still expected circular
+  mode to be unsupported). They were committed with the working tree tested
+  instead of the staged subset. Fixed by `e318635`. History was not rewritten.
+- **Commits.** `d9a8394`, `ae372f2`, `1368171`, `cfa3ec5`, `7c96eb3`,
+  `b3b0d6e`, `e318635`, `b424426`, `a0f2330`, `99163bd`, `aa025fa`,
+  `f93fb14`.
+
+## T06 — Route engine
+
+- **Purpose.** Replay of recorded routes as a first-class trajectory source
+  that obeys the same physical contract as generated motion.
+- **Built.** `domain::Route` redesigned: elapsed-nanosecond points, optional
+  altitude and name, structured `RouteError`, `from_absolute`, `is_closed`,
+  `legs`. `route::RoutePlan`: ECEF cubic Hermite spline, shared velocities,
+  rest at open ends, waits, loops over closed routes, reverse and playback
+  speed, `state_at`. `route::admit` with `RouteViolation`. `RouteModel`.
+  `is_complete` / `trajectory_complete`. Public ECEF conversions.
+- **Key decisions.** A route is input, not authority; three stages (D9).
+  Admission bounds suprema, not samples. Only closed routes loop.
+- **Found by tests.** The certified bound was not an upper bound. The peak
+  search exhausted its budget at a 1e-9 target. Coordinates are stored to
+  about 2 nm, so admission needs headroom tied to the update interval.
+  Cancellation one nanosecond before a stop gave a heading rate of
+  −1757°/s for a true −0.82°/s.
+- **Tests at close (reported).** 227. 400 random routes admitted at limits
+  3e-6 above their own peaks; the gate accepted 1 754 106 consecutive pairs.
+- **Left open.** Raw GPS logs are usually not admissible. Legs over 100 km are
+  rejected. Altitude is not limit-checked. Admission's guarantee is for the
+  scenario's update interval or longer.
+- **Mistake.** Commit `7dab0a0` is titled as the provider change but also
+  contains `movement/route.rs`. The route-model commit failed its isolated
+  test run and was correctly refused, but its files stayed staged and were
+  swept into the next commit. Both changes are tested together there.
+- **Commits.** `fb9cef2`, `5f5923e`, `87d8f86`, `7dab0a0`, `5ba2511`,
+  `e4376a3`, `af88ebb`, `00f376a`, `f5c9959`.
+
+## T07 — Consistency engine
+
+- **Purpose.** Make the emitted speed, course, timestamp, accuracy and
+  position describe one observation.
+- **Built.** `consistency::KinematicsDeriver` (backward-difference speed and
+  course from emitted positions), `check_first` / `check_pair`,
+  `ConsistencyTolerance`. Provider pipeline became movement → noise → final
+  position → derive → validate → emit. Gate: a consistency stage, and the
+  kinematic stages restated for interval means and chord directions.
+  `tests/common/recheck.rs`. `COORDINATE_RESOLUTION_M` moved to `geographic`.
+- **Key decisions.** Position and timestamp are the source of truth (D10).
+  First sample has no kinematics; two stationary thresholds; accuracy is
+  never derived.
+- **Changed existing behaviour.** (1) The gate's acceleration stage is judged
+  between interval midpoints and its heading stage over both intervals; the
+  latter is up to twice as permissive as before for even sampling. (2) The
+  noise engine's offset is now slew-limited as its parameter documented. (3)
+  Existing tests were updated to the new contract: a first sample has no
+  speed; scripted gate tests corrupt positions because model metadata is
+  ignored.
+- **Found by tests.** The noise-engine slew defect above. Rounding slack must
+  scale with the magnitude being rounded. `1 − cos(90°)` is not exactly 1.
+- **Tests at close (verified 2026-10-09).** 273. Reported statistics: 11 484
+  pairs across all six sources; 40 560 across 1 ms–5 s intervals; 51 694
+  across 180 random scenarios; without observation noise the reported speed
+  and course equal the geodesic computation exactly.
+- **Performance (reported, release build).** About 1.2 µs per sample for the
+  whole pipeline, about 270 ns of it for derivation.
+- **Left open.** Speed is an interval mean, so it depends on the sampling
+  rate. The noise engine still computes speed and course nobody uses.
+  `afeb26c` is a large commit: the noise fix, gate restatement, provider
+  change and test updates had to land together to keep every commit passing.
+- **Commits.** `9c0c8a0`, `c31854b`, `afeb26c`, `2a472fb`, `bdac304`,
+  `1be8852`.
+
+## After T07 — context documentation
+
+Not a ticket. This directory was added, and stale statements found during
+the audit were corrected (see `CURRENT_STATE.md`, "Discrepancies found").
+
+---
+
+## Recurring lessons
+
+- Strict comparisons plus independent arithmetic expose every rounding
+  assumption. Each ticket from T04 on found at least one numerical issue this
+  way. Expect the same; quantify it, do not widen a tolerance.
+- Property tests with declared-tight limits (a few parts per million above
+  what the engine needs) are what found the real defects.
+- Test what is staged, not what is on disk, when committing a subset.
+- A parameter's documentation is a contract too: T04's `max_offset_rate_mps`
+  said one thing and did a weaker one for three tickets.
