@@ -1,5 +1,12 @@
 # Architecture
 
+How each implemented module works. Why it was built this way is in
+[PROJECT_CONTEXT/ARCHITECTURE_DECISIONS.md](PROJECT_CONTEXT/ARCHITECTURE_DECISIONS.md);
+what must not be broken is in
+[PROJECT_CONTEXT/ENGINEERING_CONTRACTS.md](PROJECT_CONTEXT/ENGINEERING_CONTRACTS.md);
+the index of all context documents is
+[PROJECT_CONTEXT/README.md](PROJECT_CONTEXT/README.md).
+
 ## Layers
 
     Control / Configuration        (T12 app, CLI)
@@ -465,16 +472,17 @@ often this happens (0 in 150 000 random samples).
 
 Design decisions worth knowing:
 - **What "maximum speed" means with noise.** A noisy fix necessarily moves
-  between samples even when the true position does not. The *reported speed
-  field* never exceeds `movement.max_speed_mps`; the *distance between
-  consecutive outputs* is bounded by `(max_speed + max_offset_rate) × dt`.
-  `max_offset_rate_mps` is therefore the knob that makes jitter physically
-  plausible at any sample rate.
-- **Metadata.** Reported speed and course are those of the underlying motion
-  plus bounded measurement noise; they are not re-derived from the jittered
-  fixes (which would turn position noise into fake velocity). A stationary
-  sample stays exactly stationary with no course; a course is dropped when
-  noisy speed reaches zero. The full consistency engine is T07.
+  between samples even when the true position does not. The distance between
+  consecutive outputs is bounded by `(max_speed + max_offset_rate) × dt`, and
+  since T07 the reported speed is that distance over the elapsed time, so it
+  shares the bound. `max_offset_rate_mps` is therefore the knob that makes
+  jitter physically plausible at any sample rate.
+- **Metadata (superseded in T07).** From T04 to T06 the reported speed and
+  course were those of the underlying motion plus bounded measurement noise,
+  not re-derived from the jittered fixes. Since T07 they are derived from the
+  emitted (noisy) positions — see `consistency` — and the engine's own noisy
+  speed and course are computed but no longer emitted. Its speed and heading
+  draws survive as observation noise on the derived values.
 - **No masking.** A base position outside the boundary, or a base speed above
   the maximum, is not "repaired" by noise: the former is an error, the latter
   is passed through for the validation gate to reject.
@@ -491,7 +499,6 @@ Design decisions worth knowing:
   Models are sampled at *simulated* time `start + tick index × interval`,
   which stands still while paused, so a mover resumes where it was instead
   of leaping ahead; samples are stamped with wall time.
-  (Since T04: model → noise → assemble → validate → emit.)
   Samples are stamped with the tick's ideal time, so the emitted stream does
   not depend on poll punctuality.
 - Failure behaviour: an invalid scenario is rejected at `start` and the

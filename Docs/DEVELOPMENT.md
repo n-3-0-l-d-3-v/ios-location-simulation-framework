@@ -20,4 +20,9 @@ tooling is needed for the simulation core.
 - No new dependency in `locsim-core` without a written justification in the
   crate's `Cargo.toml`. Randomness comes only from `rng::Rng` (seeded).
 - Property tests use fixed seeds and print the failing case index.
-- Workflow per ticket: implement → test → `validate.sh` → update `PROGRESS.md` → commit.
+- Workflow per ticket: implement → test → `validate.sh` → commit and push each
+  logical change → update `PROGRESS.md` and the context documents. The full
+  rules are contract C17 in
+  [PROJECT_CONTEXT/ENGINEERING_CONTRACTS.md](PROJECT_CONTEXT/ENGINEERING_CONTRACTS.md).
+- The declared minimum Rust version (1.75) has not been tested; development
+  has only used 1.98.1.

@@ -5,17 +5,22 @@ development and controlled research. It generates a coherent, deterministic,
 validated location stream (fixed point, bounded random walk, walking, driving,
 orbit, route replay) and delivers it through a replaceable platform adapter.
 
-**Status: early.** The domain model and geographic engine are implemented and
-tested. Nothing has been run on an iPhone or the iOS Simulator yet — see
-[PROGRESS.md](PROGRESS.md) and [Docs/COMPATIBILITY.md](Docs/COMPATIBILITY.md).
+**Status: simulation core only.** Tickets T00–T07 are done: the Rust core
+generates, validates and emits a consistent synthetic location stream and is
+tested on a desktop host. There is no iOS code yet — no C ABI, no Swift
+adapter, no app — and nothing has been run on an iPhone or the iOS Simulator.
+See [PROGRESS.md](PROGRESS.md), [Docs/COMPATIBILITY.md](Docs/COMPATIBILITY.md)
+and, for the full project context and how to resume work in a new session,
+[Docs/PROJECT_CONTEXT/README.md](Docs/PROJECT_CONTEXT/README.md).
 
 ## Design in one paragraph
 
 The simulation core is a dependency-free Rust crate (`crates/locsim-core`)
-that builds and tests on Windows, macOS and Linux with no Apple tooling. iOS is
-reached through a thin C ABI and a Swift adapter that converts the core's
-`SyntheticLocation` into `CLLocation`; no simulation mathematics lives on the
-platform side. See [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md).
+that needs no Apple tooling to build and test (verified on Windows only so
+far; macOS and Linux are untested). iOS is
+planned to be reached through a thin C ABI and a Swift adapter that converts
+the core's `SyntheticLocation` into `CLLocation` (ticket T11, not started);
+no simulation mathematics will live on the platform side. See [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md).
 
 ## Out of scope
 

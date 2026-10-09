@@ -1,5 +1,9 @@
 # Progress
 
+Ticket-level log and the source of truth for which ticket is current. For the
+long-lived project context, the invariants to preserve and how to resume in a
+new session, start at [Docs/PROJECT_CONTEXT/README.md](Docs/PROJECT_CONTEXT/README.md).
+
 ## Current Ticket
 T08 — Scenario System (not started)
 
@@ -34,7 +38,9 @@ Repository: https://github.com/n-3-0-l-d-3-v/ios-location-simulation-framework
   - `geographic::COORDINATE_RESOLUTION_M` moved from the route engine.
 
 ## Current Work
-- None in flight.
+- None in flight. After T07 the project context documents were added
+  (`Docs/PROJECT_CONTEXT/`) and stale statements in README, ARCHITECTURE and
+  COMPATIBILITY corrected; no code changed.
 
 ## Tests
 Last full run (2026-10-09, Windows 11, rustc 1.98.1): **273 passed, 0 failed.**

@@ -180,9 +180,9 @@ the documentation commits unless noted.
 | 10 | Per-ticket test counts and statistics in `PROGRESS.md` history were not re-run | Labelled "reported" in `TICKET_HISTORY.md` |
 | 11 | The state reported at the end of T07 (273 tests, six commit hashes, T08 not started) | **Confirmed** against the repository |
 
-Not corrected, on purpose: the noise engine's unused speed/course output
-(code, not documentation); the `Docs/DEVELOPMENT.md` workflow line, which
-omits "push" (`ENGINEERING_CONTRACTS.md` C17 is the authority).
+Also corrected: the `Docs/DEVELOPMENT.md` workflow line, which omitted
+"push". Not corrected, on purpose: the noise engine's unused speed/course
+output (that is code, not documentation).
 
 ## What goes stale, and how to check it
 

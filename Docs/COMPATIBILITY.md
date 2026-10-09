@@ -8,7 +8,8 @@ A row is never upgraded on the basis that it "should work".
 
 | Host | Toolchain | Status | Notes |
 |---|---|---|---|
-| Windows 11 x86_64 | rustc 1.98.1 | Verified | Full test suite, 2026-10-08 |
+| Windows 11 x86_64 | rustc 1.98.1 | Verified | Full test suite (273 tests) at commit `1be8852`, 2026-10-09 |
+| Any host | rustc 1.75 (declared `rust-version`) | Untested | The minimum version in `Cargo.toml` has never been built; only 1.98.1 has |
 | macOS (arm64 / x86_64) | — | Untested | |
 | Linux x86_64 | — | Untested | |
 | iOS arm64 (`aarch64-apple-ios`) | — | Untested | Not yet cross-compiled |
