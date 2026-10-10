@@ -13,6 +13,14 @@ name = "locsim-core"
 version = "0.1.0"
 
 [[package]]
+name = "locsim-health"
+version = "0.1.0"
+dependencies = [
+ "locsim-core",
+ "locsim-scenario",
+]
+
+[[package]]
 name = "locsim-scenario"
 version = "0.1.0"
 dependencies = [

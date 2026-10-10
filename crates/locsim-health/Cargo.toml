@@ -1,0 +1,17 @@
+[package]
+name = "locsim-health"
+description = "Health supervision of a locsim location provider: watchdog, bounded restart, events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Depends on the simulation core only, and on nothing outside the workspace.
+# It does not know about scenario documents or files: failures of other
+# components reach it as reports made by the caller.
+[dependencies]
+locsim-core = { path = "../locsim-core" }
+
+# The tests run the example scenarios through a supervised provider.
+[dev-dependencies]
+locsim-scenario = { path = "../locsim-scenario" }
