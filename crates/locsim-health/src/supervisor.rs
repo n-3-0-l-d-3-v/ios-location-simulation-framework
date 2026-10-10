@@ -26,14 +26,63 @@
 //!   not the one the supervisor's lifecycle implies. `RunFailed` and
 //!   `RunEnded` are recorded.
 //!
+//! # Recovery is a new run
+//!
+//! When a run fails and the policy allows, the supervisor waits out a
+//! backoff and then starts **a new run of the same scenario**. That is all
+//! recovery is. It does not resume anything:
+//!
+//! - The new run begins where every run of the scenario begins, with fresh
+//!   random streams, noise and validation history. Its first sample has no
+//!   speed and no course.
+//! - Between the last sample of the failed run and the first of the new one
+//!   there is a jump in position. No continuity is claimed or checked
+//!   across it; each run is validated on its own, exactly as before.
+//! - The run number in the report increases. A consumer must treat a new
+//!   run number as a discontinuity.
+//! - A run is a deterministic function of the scenario and the calls made.
+//!   A failure that does not depend on timing will happen again in the new
+//!   run. The bound on attempts is what limits that; nothing is reseeded or
+//!   altered to make a retry differ.
+//!
+//! What is kept across runs is bookkeeping only: the totals, the last
+//! error, and the timestamp of the last sample handed on.
+//!
+//! ## Attempts
+//!
+//! `max_recovery_attempts` counts restart attempts in one failure episode.
+//! An episode begins at a failure and ends when a restarted run has emitted
+//! for `stable_after_s` (the count returns to zero), when the supervisor
+//! gives up, or when it is stopped. A restart that cannot start a run uses
+//! up its attempt like any other. A failure while a restarted run is still
+//! on probation continues the same episode.
+//!
+//! ## Which errors are retried
+//!
+//! All of them, within the bound, except one that a later start provably
+//! cannot cure: tick times that are no longer representable
+//! (`ScheduleError::Overflow`). Errors are told apart by their variant;
+//! nothing is read from their text. Retrying is not a claim that the error
+//! is recoverable, only that it is not known to be permanent.
+//!
 //! # Timestamps
 //!
 //! Within one session (from `start` to `stop`) the timestamps of the
 //! samples handed on strictly increase. A sample whose timestamp is not
 //! later than the previous one is withheld and ends the run, reported as
-//! `ValidationError::NonMonotonicTimestamp`. Nothing is promised across a
-//! `stop` and a later `start`: like the core provider, a new session may
-//! start at any time.
+//! `ValidationError::NonMonotonicTimestamp`. This holds across automatic
+//! restarts too.
+//!
+//! With `SimulationProvider` the check never has to act. A restarted run is
+//! started at the time of the call that restarts it, which is not before
+//! the failing poll, and every sample of a run is stamped at or after the
+//! start of its run: with the ideal time of its tick, so later than the
+//! start if the first poll comes late, never earlier. The last sample
+//! handed on belongs to a tick before the one that failed. For any other
+//! provider the check is what makes the statement true.
+//!
+//! Nothing is promised across a `stop` and a later `start`: like the core
+//! provider, a new session may start at any time.
 //!
 //! # One place for state, totals and events
 //!
@@ -43,7 +92,7 @@
 //! stored: it is computed from the state when asked.
 
 use crate::event::{Event, EventKind, EventSink, FailReason, Operation, RunEndReason};
-use crate::policy::{HealthPolicy, Limits, PolicyError};
+use crate::policy::{Backoff, HealthPolicy, Limits, PolicyError};
 use crate::report::{Cause, Emission, HealthReport, Totals};
 use locsim_core::domain::{
     HealthState, InvalidTransition, SimulationState, SyntheticLocation, Timestamp,
@@ -59,6 +108,10 @@ enum Lifecycle {
     Stopped,
     Running,
     Paused,
+    /// The run failed; a restart is due at `at`.
+    AwaitingRetry {
+        at: Timestamp,
+    },
     /// The run failed for good; waiting to be stopped.
     Failed,
 }
@@ -69,6 +122,7 @@ impl Lifecycle {
             Lifecycle::Stopped => SimulationState::Idle,
             Lifecycle::Running => SimulationState::Running,
             Lifecycle::Paused => SimulationState::Paused,
+            Lifecycle::AwaitingRetry { .. } => SimulationState::Recovering,
             Lifecycle::Failed => SimulationState::Error,
         }
     }
@@ -88,6 +142,9 @@ struct Run {
     /// The wrapped provider's missed-tick count as last read.
     missed: u64,
     last_sample: Option<SyntheticLocation>,
+    /// Set for a run started by a recovery, until it has proved stable.
+    /// Holds the timestamp of its first sample once there is one.
+    probation: Option<Option<Timestamp>>,
 }
 
 /// Wraps a provider and supervises it. See the module documentation.
@@ -102,6 +159,10 @@ pub struct Supervisor<P: LocationProvider> {
     /// Timestamp of the last sample handed on in this session.
     last_forwarded: Option<Timestamp>,
     last_error: Option<ProviderError>,
+    /// Restart attempts used in the current failure episode.
+    attempts_used: u32,
+    /// The delays of the current failure episode; `None` outside one.
+    backoff: Option<Backoff>,
     /// Totals of the runs that are over. The current run is added on read.
     ended: Totals,
     /// Latest time passed to any call.
@@ -128,6 +189,8 @@ impl<P: LocationProvider> Supervisor<P> {
             run: Run::default(),
             last_forwarded: None,
             last_error: None,
+            attempts_used: 0,
+            backoff: None,
             ended: Totals::default(),
             observed_at: None,
             clock_regressed: false,
@@ -152,9 +215,9 @@ impl<P: LocationProvider> Supervisor<P> {
             causes,
             emission: self.emission(),
             run: self.run_number,
-            attempts_used: 0,
+            attempts_used: self.attempts_used,
             max_attempts: self.limits.max_recovery_attempts,
-            retry_at: None,
+            retry_at: self.next_deadline(),
             last_error: self.last_error.clone(),
             totals: self.totals(),
             current: self.status(),
@@ -162,16 +225,49 @@ impl<P: LocationProvider> Supervisor<P> {
         }
     }
 
+    /// Lets the supervisor act on the time without asking for a sample: a
+    /// restart attempt that has come due is made (the new run is started
+    /// but not polled). Returns the state afterwards.
+    ///
+    /// Nothing in this crate calls it. Whoever owns a timer does.
+    pub fn check(&mut self, now: Timestamp) -> HealthReport {
+        self.observe(now);
+        if let Lifecycle::AwaitingRetry { at } = self.lifecycle {
+            if now >= at {
+                self.attempt_restart(now);
+            }
+        }
+        self.announce(now);
+        self.health()
+    }
+
+    /// When the supervisor next needs to be called for something it has
+    /// scheduled itself: the time of the pending restart attempt, if any.
+    pub fn next_deadline(&self) -> Option<Timestamp> {
+        match self.lifecycle {
+            Lifecycle::AwaitingRetry { at } => Some(at),
+            _ => None,
+        }
+    }
+
     // --- Derived, never stored ----------------------------------------------------
 
     fn causes(&self) -> Vec<Cause> {
-        Vec::new()
+        let mut causes = Vec::new();
+        if !self.lifecycle.has_run() {
+            return causes;
+        }
+        if self.run.probation.is_some() {
+            causes.push(Cause::Probation);
+        }
+        causes
     }
 
     fn derive_health(&self, causes: &[Cause]) -> HealthState {
         match self.lifecycle {
             Lifecycle::Stopped => HealthState::Stopped,
             Lifecycle::Failed => HealthState::Failed,
+            Lifecycle::AwaitingRetry { .. } => HealthState::Recovering,
             Lifecycle::Running | Lifecycle::Paused if causes.is_empty() => HealthState::Healthy,
             Lifecycle::Running | Lifecycle::Paused => HealthState::Degraded,
         }
@@ -315,21 +411,96 @@ impl<P: LocationProvider> Supervisor<P> {
             },
         );
         self.end_run(at, RunEndReason::Failure);
+        self.after_failure(at, error);
+    }
+
+    /// Decides what follows a failed run or a failed restart: another
+    /// attempt, or the end.
+    fn after_failure(&mut self, at: Timestamp, error: ProviderError) {
         let permanent = is_permanent(&error);
         self.last_error = Some(error);
-        self.give_up(
-            at,
-            if permanent {
-                FailReason::Permanent
-            } else {
-                FailReason::AttemptsExhausted
-            },
-        );
+        if permanent {
+            return self.give_up(at, FailReason::Permanent);
+        }
+        if self.attempts_used >= self.limits.max_recovery_attempts {
+            return self.give_up(at, FailReason::AttemptsExhausted);
+        }
+        let limits = self.limits;
+        let delay_ns = self.backoff.get_or_insert_with(|| limits.backoff()).take();
+        match at.checked_add_nanos(delay_ns) {
+            Some(retry_at) => {
+                self.lifecycle = Lifecycle::AwaitingRetry { at: retry_at };
+                self.record(
+                    at,
+                    EventKind::RecoveryScheduled {
+                        attempt: self.attempts_used + 1,
+                        at: retry_at,
+                    },
+                );
+            }
+            None => self.give_up(at, FailReason::RetryTimeUnrepresentable),
+        }
     }
 
     fn give_up(&mut self, at: Timestamp, reason: FailReason) {
         self.lifecycle = Lifecycle::Failed;
+        self.backoff = None;
         self.record(at, EventKind::Failed { reason });
+    }
+
+    /// Makes the restart attempt that has come due: stops whatever is left
+    /// of the failed run and starts a new one at `now`.
+    fn attempt_restart(&mut self, now: Timestamp) {
+        self.attempts_used += 1;
+        let attempt = self.attempts_used;
+        self.record(now, EventKind::RecoveryAttempted { attempt });
+        // After a failed poll the provider is in `Error` and must be
+        // stopped; after a start that failed it is already idle, and
+        // stopping it then would itself be refused.
+        let stopped = if self.provider.status().state == SimulationState::Idle {
+            Ok(())
+        } else {
+            self.provider.stop()
+        };
+        match stopped.and_then(|()| self.provider.start(now)) {
+            Ok(()) => {
+                self.begin_run(now, Some(attempt));
+                self.run.probation = Some(None);
+                self.verify(now);
+            }
+            Err(error) => {
+                self.record(
+                    now,
+                    EventKind::RecoveryStartFailed {
+                        attempt,
+                        error: error.clone(),
+                    },
+                );
+                self.after_failure(now, error);
+            }
+        }
+    }
+
+    /// Ends the failure episode once the restarted run has emitted for long
+    /// enough. Called with the timestamp of a sample just handed on.
+    fn note_progress(&mut self, at: Timestamp, sample_time: Timestamp) {
+        let Some(first) = &mut self.run.probation else {
+            return;
+        };
+        let first = *first.get_or_insert(sample_time);
+        let emitted_for = sample_time.as_nanos() as i128 - first.as_nanos() as i128;
+        if emitted_for >= self.limits.stable_after_ns as i128 {
+            self.run.probation = None;
+            self.backoff = None;
+            let attempts = std::mem::take(&mut self.attempts_used);
+            self.record(at, EventKind::Recovered { attempts });
+        }
+    }
+
+    /// Forgets the failure episode, if there is one.
+    fn end_episode(&mut self) {
+        self.attempts_used = 0;
+        self.backoff = None;
     }
 
     /// Reads the wrapped provider's missed-tick count into the run.
@@ -388,7 +559,8 @@ impl<P: LocationProvider> LocationProvider for Supervisor<P> {
     }
 
     /// Ends the session. Legal whenever the supervisor is not stopped,
-    /// including after it has failed.
+    /// including after it has failed and while a restart is pending, which
+    /// it cancels.
     fn stop(&mut self) -> Result<(), ProviderError> {
         let at = self.latest();
         if self.lifecycle == Lifecycle::Stopped {
@@ -405,6 +577,7 @@ impl<P: LocationProvider> LocationProvider for Supervisor<P> {
             self.end_run(at, RunEndReason::Stopped);
         }
         self.lifecycle = Lifecycle::Stopped;
+        self.end_episode();
         self.record(at, EventKind::Stopped);
         self.announce(at);
         Ok(())
@@ -446,9 +619,18 @@ impl<P: LocationProvider> LocationProvider for Supervisor<P> {
     /// handed on. An `Err` means the run has just failed: it is the wrapped
     /// provider's error, or `NonMonotonicTimestamp` for a withheld sample.
     /// Afterwards, and whenever no run is running, the answer is `Ok(None)`.
+    ///
+    /// If a restart attempt is due it is made first, and the new run is
+    /// polled in the same call.
     fn poll(&mut self, now: Timestamp) -> Result<Option<SyntheticLocation>, ProviderError> {
         self.observe(now);
+        if let Lifecycle::AwaitingRetry { at } = self.lifecycle {
+            if now >= at {
+                self.attempt_restart(now);
+            }
+        }
         if self.lifecycle != Lifecycle::Running {
+            self.announce(now);
             return Ok(None);
         }
         let result = match self.provider.poll(now) {
@@ -480,6 +662,7 @@ impl<P: LocationProvider> LocationProvider for Supervisor<P> {
                         self.run.forwarded = self.run.forwarded.saturating_add(1);
                         self.run.last_sample = Some(sample);
                         self.last_forwarded = Some(sample.timestamp);
+                        self.note_progress(now, sample.timestamp);
                         self.verify(now);
                         Ok(Some(sample))
                     }

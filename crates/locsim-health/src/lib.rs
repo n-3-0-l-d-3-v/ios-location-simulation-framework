@@ -9,8 +9,6 @@
 //! of its policy, the wrapped provider and the sequence of calls.
 
 #![forbid(unsafe_code)]
-// The backoff is used once recovery lands, in the next commit.
-#![allow(dead_code)]
 
 mod event;
 mod policy;
