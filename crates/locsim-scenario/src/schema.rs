@@ -60,7 +60,7 @@ fn direction_name(direction: RotationDirection) -> &'static str {
     }
 }
 
-type Errors = Vec<ScenarioError>;
+pub(crate) type Errors = Vec<ScenarioError>;
 
 // ---------------------------------------------------------------- encoding
 
@@ -69,7 +69,7 @@ struct Encoder {
 }
 
 impl Encoder {
-    fn float(&mut self, path: &str, v: f64) -> Json {
+    pub(crate) fn float(&mut self, path: &str, v: f64) -> Json {
         if !v.is_finite() {
             self.errors
                 .push(ScenarioError::NonFiniteNumber { path: path.into() });
@@ -240,7 +240,7 @@ impl Encoder {
     }
 }
 
-fn object(members: Vec<(&'static str, Json)>) -> Json {
+pub(crate) fn object(members: Vec<(&'static str, Json)>) -> Json {
     Json::Object(
         members
             .into_iter()
@@ -266,14 +266,14 @@ pub(crate) fn encode(scenario: &Scenario) -> Result<Json, Errors> {
 
 /// One JSON object being read: hands out its members by name and, when
 /// closed, reports the ones nobody asked for.
-struct Fields<'a> {
+pub(crate) struct Fields<'a> {
     path: String,
     members: &'a [(String, Json)],
     used: Vec<bool>,
 }
 
 impl<'a> Fields<'a> {
-    fn open(value: &'a Json, path: &str, errors: &mut Errors) -> Option<Self> {
+    pub(crate) fn open(value: &'a Json, path: &str, errors: &mut Errors) -> Option<Self> {
         let Some(members) = value.members() else {
             wrong_type::<()>(path, "object", value, errors);
             return None;
@@ -286,7 +286,7 @@ impl<'a> Fields<'a> {
     }
 
     /// The member `key` and its path, or a `MissingField` error.
-    fn take(&mut self, key: &str, errors: &mut Errors) -> Option<(&'a Json, String)> {
+    pub(crate) fn take(&mut self, key: &str, errors: &mut Errors) -> Option<(&'a Json, String)> {
         let path = member_path(&self.path, key);
         match self.members.iter().position(|(k, _)| k == key) {
             Some(index) => {
@@ -300,13 +300,13 @@ impl<'a> Fields<'a> {
         }
     }
 
-    fn float(&mut self, key: &str, errors: &mut Errors) -> Option<f64> {
+    pub(crate) fn float(&mut self, key: &str, errors: &mut Errors) -> Option<f64> {
         let (value, path) = self.take(key, errors)?;
         float(value, &path, errors)
     }
 
     /// `Some(None)` for an explicit `null`; `None` when there was an error.
-    fn optional_float(&mut self, key: &str, errors: &mut Errors) -> Option<Option<f64>> {
+    pub(crate) fn optional_float(&mut self, key: &str, errors: &mut Errors) -> Option<Option<f64>> {
         let (value, path) = self.take(key, errors)?;
         match value {
             Json::Null => Some(None),
@@ -314,7 +314,7 @@ impl<'a> Fields<'a> {
         }
     }
 
-    fn boolean(&mut self, key: &str, errors: &mut Errors) -> Option<bool> {
+    pub(crate) fn boolean(&mut self, key: &str, errors: &mut Errors) -> Option<bool> {
         let (value, path) = self.take(key, errors)?;
         match value {
             Json::Bool(v) => Some(*v),
@@ -322,12 +322,12 @@ impl<'a> Fields<'a> {
         }
     }
 
-    fn string(&mut self, key: &str, errors: &mut Errors) -> Option<&'a str> {
+    pub(crate) fn string(&mut self, key: &str, errors: &mut Errors) -> Option<&'a str> {
         let (value, path) = self.take(key, errors)?;
         string(value, &path, errors)
     }
 
-    fn named<T: Copy>(
+    pub(crate) fn named<T: Copy>(
         &mut self,
         key: &str,
         variants: &[T],
@@ -350,7 +350,7 @@ impl<'a> Fields<'a> {
         found
     }
 
-    fn close(self, errors: &mut Errors) {
+    pub(crate) fn close(self, errors: &mut Errors) {
         for ((key, _), used) in self.members.iter().zip(&self.used) {
             if !used {
                 errors.push(ScenarioError::UnknownField {
@@ -361,7 +361,7 @@ impl<'a> Fields<'a> {
     }
 }
 
-fn wrong_type<T>(
+pub(crate) fn wrong_type<T>(
     path: &str,
     expected: &'static str,
     value: &Json,
@@ -375,7 +375,7 @@ fn wrong_type<T>(
     None
 }
 
-fn invalid<T>(path: &str, reason: impl Into<String>, errors: &mut Errors) -> Option<T> {
+pub(crate) fn invalid<T>(path: &str, reason: impl Into<String>, errors: &mut Errors) -> Option<T> {
     errors.push(ScenarioError::InvalidValue {
         path: path.to_string(),
         reason: reason.into(),
@@ -383,7 +383,7 @@ fn invalid<T>(path: &str, reason: impl Into<String>, errors: &mut Errors) -> Opt
     None
 }
 
-fn float(value: &Json, path: &str, errors: &mut Errors) -> Option<f64> {
+pub(crate) fn float(value: &Json, path: &str, errors: &mut Errors) -> Option<f64> {
     let v = match value {
         // The nearest double to the literal, as for any decimal literal.
         Json::Number(Number::PosInt(v)) => *v as f64,
@@ -398,7 +398,7 @@ fn float(value: &Json, path: &str, errors: &mut Errors) -> Option<f64> {
     }
 }
 
-fn string<'a>(value: &'a Json, path: &str, errors: &mut Errors) -> Option<&'a str> {
+pub(crate) fn string<'a>(value: &'a Json, path: &str, errors: &mut Errors) -> Option<&'a str> {
     match value {
         Json::String(v) => Some(v),
         _ => wrong_type(path, "string", value, errors),
@@ -418,7 +418,7 @@ fn schema_version(value: &Json, path: &str, errors: &mut Errors) -> Option<u32> 
     }
 }
 
-fn elapsed_ns(value: &Json, path: &str, errors: &mut Errors) -> Option<i64> {
+pub(crate) fn integer_i64(value: &Json, path: &str, errors: &mut Errors) -> Option<i64> {
     match value {
         Json::Number(Number::PosInt(v)) => match i64::try_from(*v) {
             Ok(v) => Some(v),
@@ -434,7 +434,7 @@ fn elapsed_ns(value: &Json, path: &str, errors: &mut Errors) -> Option<i64> {
 }
 
 /// A `u64` in canonical decimal: digits only, no leading zero except `"0"`.
-fn seed(value: &Json, path: &str, errors: &mut Errors) -> Option<u64> {
+pub(crate) fn decimal_u64(value: &Json, path: &str, errors: &mut Errors) -> Option<u64> {
     let Json::String(text) = value else {
         return wrong_type(path, "string of decimal digits", value, errors);
     };
@@ -451,13 +451,13 @@ fn seed(value: &Json, path: &str, errors: &mut Errors) -> Option<u64> {
         Ok(v) => Some(v),
         Err(_) => invalid(
             path,
-            format!("{text} is above the largest seed, {}", u64::MAX),
+            format!("{text} is above the largest value, {}", u64::MAX),
             errors,
         ),
     }
 }
 
-fn coordinate(value: &Json, path: &str, errors: &mut Errors) -> Option<Coordinate> {
+pub(crate) fn coordinate(value: &Json, path: &str, errors: &mut Errors) -> Option<Coordinate> {
     let mut fields = Fields::open(value, path, errors)?;
     let latitude = fields.float("latitude", errors);
     let longitude = fields.float("longitude", errors);
@@ -551,7 +551,7 @@ fn route_point(value: &Json, path: &str, errors: &mut Errors) -> Option<RoutePoi
     let mut f = Fields::open(value, path, errors)?;
     let elapsed = f
         .take("elapsed_ns", errors)
-        .and_then(|(v, p)| elapsed_ns(v, &p, errors));
+        .and_then(|(v, p)| integer_i64(v, &p, errors));
     let position = f
         .take("coordinate", errors)
         .and_then(|(v, p)| coordinate(v, &p, errors));
@@ -619,7 +619,7 @@ fn scenario(value: &Json, errors: &mut Errors) -> Option<Scenario> {
     let update_interval_s = f.float("update_interval_s", errors);
     let seed = f
         .take("seed", errors)
-        .and_then(|(v, p)| seed(v, &p, errors));
+        .and_then(|(v, p)| decimal_u64(v, &p, errors));
     let route = f.take("route", errors).and_then(|(v, p)| match v {
         Json::Null => Some(None),
         _ => route(v, &p, errors).map(Some),

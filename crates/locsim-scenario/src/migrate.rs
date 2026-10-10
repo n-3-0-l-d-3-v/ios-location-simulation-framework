@@ -18,7 +18,7 @@
 use crate::error::ScenarioError;
 use crate::json::{Json, Number, ROOT};
 
-const VERSION_KEY: &str = "schema_version";
+pub(crate) const VERSION_KEY: &str = "schema_version";
 
 /// Rewrites a document from one schema version to the next. It must not
 /// touch `schema_version`: the chain advances it. An `Err` carries the
@@ -26,6 +26,8 @@ const VERSION_KEY: &str = "schema_version";
 pub(crate) type MigrationStep = fn(&mut Json) -> Result<(), String>;
 
 pub(crate) struct MigrationChain {
+    /// The member that states a document's version.
+    pub(crate) version_key: &'static str,
     /// The oldest schema version that can still be read.
     pub(crate) oldest: u32,
     /// `steps[i]` migrates version `oldest + i` to `oldest + i + 1`.
@@ -34,6 +36,7 @@ pub(crate) struct MigrationChain {
 
 /// The chain used by `import_scenario`.
 pub(crate) const PRODUCTION: MigrationChain = MigrationChain {
+    version_key: VERSION_KEY,
     oldest: 1,
     steps: &[],
 };
@@ -56,9 +59,9 @@ impl MigrationChain {
                 found: document.kind(),
             });
         }
-        let Some(value) = document.get(VERSION_KEY) else {
+        let Some(value) = document.get(self.version_key) else {
             return Err(ScenarioError::MissingField {
-                path: VERSION_KEY.into(),
+                path: self.version_key.into(),
             });
         };
         match value {
@@ -70,11 +73,11 @@ impl MigrationChain {
                 }),
             },
             Json::Number(Number::NegInt(found)) => Err(ScenarioError::InvalidValue {
-                path: VERSION_KEY.into(),
+                path: self.version_key.into(),
                 reason: format!("{found} is not a schema version"),
             }),
             other => Err(ScenarioError::WrongType {
-                path: VERSION_KEY.into(),
+                path: self.version_key.into(),
                 expected: "integer",
                 found: other.kind(),
             }),
@@ -90,12 +93,12 @@ impl MigrationChain {
             let failed = |reason: String| ScenarioError::Migration { from, reason };
             step(&mut document).map_err(failed)?;
             let version = match &mut document {
-                Json::Object(members) => members.iter_mut().find(|(k, _)| k == VERSION_KEY),
+                Json::Object(members) => members.iter_mut().find(|(k, _)| k == self.version_key),
                 _ => None,
             };
             match version {
                 Some((_, value)) => *value = Json::Number(Number::PosInt(u64::from(from) + 1)),
-                None => return Err(failed(format!("the step removed {VERSION_KEY}"))),
+                None => return Err(failed(format!("the step removed {}", self.version_key))),
             }
         }
         Ok(document)
@@ -163,6 +166,7 @@ mod tests {
     }
 
     const CHAIN: MigrationChain = MigrationChain {
+        version_key: VERSION_KEY,
         oldest: 1,
         steps: &[rename, nest],
     };
@@ -283,6 +287,7 @@ mod tests {
     fn a_failing_step_stops_the_chain_and_names_its_version() {
         // The first step succeeds, the second finds nothing to move.
         const BROKEN: MigrationChain = MigrationChain {
+            version_key: VERSION_KEY,
             oldest: 1,
             steps: &[nest, nest],
         };
@@ -307,6 +312,7 @@ mod tests {
     #[test]
     fn a_step_cannot_lose_the_version() {
         const CARELESS: MigrationChain = MigrationChain {
+            version_key: VERSION_KEY,
             oldest: 3,
             steps: &[drop_version],
         };
@@ -333,6 +339,7 @@ mod tests {
             Ok(())
         }
         const CHAIN: MigrationChain = MigrationChain {
+            version_key: VERSION_KEY,
             oldest: 7,
             steps: &[liar, liar],
         };

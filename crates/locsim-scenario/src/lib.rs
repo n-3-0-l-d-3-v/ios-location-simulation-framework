@@ -29,16 +29,28 @@
 //!
 //! Importing a scenario does not admit its route: whether a route can be
 //! replayed within the movement limits is decided when a run starts.
+//!
+//! # The last-known record
+//!
+//! A second, separate document: the most recent sample a provider emitted,
+//! its counters and the fingerprint of its scenario
+//! ([`export_last_known`], [`import_last_known`], [`scenario_fingerprint`]).
+//! It is as strict as a scenario document and has its own version. It is a
+//! record of an output, not a checkpoint: a run cannot be resumed from it.
 
 #![forbid(unsafe_code)]
 
 mod error;
 mod json;
 mod migrate;
+mod record;
 mod schema;
 
 pub use error::ScenarioError;
 pub use locsim_core::domain::CURRENT_SCHEMA_VERSION;
+pub use record::{
+    export_last_known, import_last_known, scenario_fingerprint, LastKnown, CURRENT_RECORD_VERSION,
+};
 
 use locsim_core::domain::Scenario;
 use migrate::MigrationChain;
@@ -118,6 +130,7 @@ mod tests {
     }
 
     const WITH_V0: MigrationChain = MigrationChain {
+        version_key: migrate::VERSION_KEY,
         oldest: 0,
         steps: &[from_v0],
     };

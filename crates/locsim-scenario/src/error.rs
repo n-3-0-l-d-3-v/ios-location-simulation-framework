@@ -1,4 +1,4 @@
-use locsim_core::domain::{ConfigError, RouteError};
+use locsim_core::domain::{ConfigError, LocationError, RouteError};
 use locsim_core::geographic::CoordinateError;
 use std::fmt;
 
@@ -19,7 +19,7 @@ pub enum ScenarioError {
     DuplicateKey {
         path: String,
     },
-    /// The document's `schema_version` is not one this build can read.
+    /// The document's version is not one this build can read.
     UnsupportedVersion {
         found: u64,
         supported: u32,
@@ -53,6 +53,11 @@ pub enum ScenarioError {
         path: String,
         error: RouteError,
     },
+    /// A last-known record holds a sample that is not fit to emit.
+    InvalidSample {
+        path: String,
+        error: LocationError,
+    },
     /// The document is well formed but describes an invalid scenario
     /// (reported by `Scenario::validate`).
     InvalidScenario(ConfigError),
@@ -77,7 +82,7 @@ impl fmt::Display for ScenarioError {
             ScenarioError::DuplicateKey { path } => write!(f, "{path}: duplicate key"),
             ScenarioError::UnsupportedVersion { found, supported } => write!(
                 f,
-                "schema_version: unsupported version {found} (this build supports {supported})"
+                "unsupported document version {found} (this build supports {supported})"
             ),
             ScenarioError::Migration { from, reason } => {
                 write!(f, "migration from schema version {from} failed: {reason}")
@@ -92,6 +97,7 @@ impl fmt::Display for ScenarioError {
             ScenarioError::InvalidValue { path, reason } => write!(f, "{path}: {reason}"),
             ScenarioError::InvalidCoordinate { path, error } => write!(f, "{path}: {error}"),
             ScenarioError::InvalidRoute { path, error } => write!(f, "{path}: {error}"),
+            ScenarioError::InvalidSample { path, error } => write!(f, "{path}: {error}"),
             ScenarioError::InvalidScenario(e) => write!(f, "{e}"),
             ScenarioError::NonFiniteNumber { path } => {
                 write!(f, "{path}: not finite, cannot be written as JSON")

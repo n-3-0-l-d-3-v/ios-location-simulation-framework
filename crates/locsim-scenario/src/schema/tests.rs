@@ -79,16 +79,16 @@ pub(crate) fn fingerprint(s: &Scenario) -> String {
 // ------------------------------------------------------- document surgery
 
 #[derive(Debug, Clone)]
-enum Step {
+pub(crate) enum Step {
     Key(String),
     Index(usize),
 }
 
 #[derive(Debug, Clone)]
-struct Node {
-    path: String,
-    steps: Vec<Step>,
-    kind: &'static str,
+pub(crate) struct Node {
+    pub(crate) path: String,
+    pub(crate) steps: Vec<Step>,
+    pub(crate) kind: &'static str,
 }
 
 /// Every node of the document below the root, depth first.
@@ -118,13 +118,13 @@ fn nodes(value: &Json, path: &str, steps: &[Step], out: &mut Vec<Node>) {
     }
 }
 
-fn all_nodes(doc: &Json) -> Vec<Node> {
+pub(crate) fn all_nodes(doc: &Json) -> Vec<Node> {
     let mut out = Vec::new();
     nodes(doc, ROOT, &[], &mut out);
     out
 }
 
-fn node_mut<'a>(doc: &'a mut Json, steps: &[Step]) -> &'a mut Json {
+pub(crate) fn node_mut<'a>(doc: &'a mut Json, steps: &[Step]) -> &'a mut Json {
     let mut current = doc;
     for step in steps {
         current = match (current, step) {
@@ -138,7 +138,7 @@ fn node_mut<'a>(doc: &'a mut Json, steps: &[Step]) -> &'a mut Json {
     current
 }
 
-fn with(doc: &Json, path: &str, value: Json) -> Json {
+pub(crate) fn with(doc: &Json, path: &str, value: Json) -> Json {
     let node = all_nodes(doc)
         .into_iter()
         .find(|n| n.path == path)
@@ -148,11 +148,11 @@ fn with(doc: &Json, path: &str, value: Json) -> Json {
     doc
 }
 
-fn text(s: &str) -> Json {
+pub(crate) fn text(s: &str) -> Json {
     Json::String(s.into())
 }
 
-fn int(v: u64) -> Json {
+pub(crate) fn int(v: u64) -> Json {
     Json::Number(Number::PosInt(v))
 }
 
