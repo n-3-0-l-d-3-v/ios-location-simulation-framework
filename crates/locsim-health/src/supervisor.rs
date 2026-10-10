@@ -112,6 +112,17 @@
 //! within the limit. Paused time adds no slots, so a window continues
 //! across a pause. A new run starts with an empty window.
 //!
+//! # Faults of other components
+//!
+//! The supervisor watches one provider. Whatever else can go wrong around
+//! it (storing a record, delivering a sample) it learns only if the caller
+//! says so, with [`Supervisor::report_fault`], and forgets when the caller
+//! says so, with [`Supervisor::clear_fault`]. A reported fault makes a run
+//! `Degraded` for as long as it stands. It never stops samples, never ends
+//! a run and never causes a restart: a store that cannot write is not a
+//! simulation that cannot run. This crate knows no other component by
+//! name and depends on none.
+//!
 //! # One place for state, totals and events
 //!
 //! Every event passes through [`Supervisor::record`], and the cumulative
@@ -206,6 +217,9 @@ pub struct Supervisor<P: LocationProvider> {
     clock_regressed: bool,
     /// The health last announced with a `HealthChanged` event.
     announced: HealthState,
+    /// Faults the caller has reported and not cleared, in the order they
+    /// were first reported, with their latest detail.
+    faults: Vec<(&'static str, String)>,
 }
 
 impl<P: LocationProvider> Supervisor<P> {
@@ -231,6 +245,7 @@ impl<P: LocationProvider> Supervisor<P> {
             observed_at: None,
             clock_regressed: false,
             announced: HealthState::Stopped,
+            faults: Vec::new(),
         })
     }
 
@@ -257,7 +272,11 @@ impl<P: LocationProvider> Supervisor<P> {
             last_error: self.last_error.clone(),
             totals: self.totals(),
             current: self.status(),
-            active_faults: Vec::new(),
+            active_faults: self
+                .faults
+                .iter()
+                .map(|(component, _)| *component)
+                .collect(),
         }
     }
 
@@ -277,6 +296,35 @@ impl<P: LocationProvider> Supervisor<P> {
         self.watch_for_stall(now);
         self.announce(now);
         self.health()
+    }
+
+    /// Notes that another component is at fault. The fault stands until it
+    /// is cleared. Reporting the same component again replaces the detail.
+    ///
+    /// While a run exists, a standing fault makes the health `Degraded`; it
+    /// does nothing else. The detail is recorded as given: keep positions
+    /// out of it.
+    pub fn report_fault(&mut self, now: Timestamp, component: &'static str, detail: String) {
+        self.observe(now);
+        match self.faults.iter_mut().find(|(c, _)| *c == component) {
+            Some(fault) => fault.1.clone_from(&detail),
+            None => self.faults.push((component, detail.clone())),
+        }
+        self.record(now, EventKind::FaultReported { component, detail });
+        self.announce(now);
+    }
+
+    /// Notes that a reported fault is over. Returns whether there was one.
+    pub fn clear_fault(&mut self, now: Timestamp, component: &'static str) -> bool {
+        self.observe(now);
+        let before = self.faults.len();
+        self.faults.retain(|(c, _)| *c != component);
+        let cleared = self.faults.len() < before;
+        if cleared {
+            self.record(now, EventKind::FaultCleared { component });
+            self.announce(now);
+        }
+        cleared
     }
 
     /// When the supervisor next needs to be called for something it has
@@ -304,6 +352,11 @@ impl<P: LocationProvider> Supervisor<P> {
         if self.run.probation.is_some() {
             causes.push(Cause::Probation);
         }
+        causes.extend(
+            self.faults
+                .iter()
+                .map(|(component, _)| Cause::ExternalFault(component)),
+        );
         causes
     }
 
