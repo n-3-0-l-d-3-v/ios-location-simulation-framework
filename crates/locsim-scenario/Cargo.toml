@@ -1,0 +1,28 @@
+[package]
+name = "locsim-scenario"
+description = "Strict JSON import/export of locsim-core scenarios, with schema versioning"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# The simulation core stays dependency-free (architecture decision D1); the
+# JSON codec lives in this separate crate so that its dependencies never reach
+# the core. Justification for each dependency (decision D14):
+#
+# - serde_json: a JSON reader and writer is security- and correctness-
+#   sensitive text handling (escapes, surrogates, number grammar, recursion
+#   limits). A widely used, fuzzed implementation is preferred to a
+#   hand-written one. `float_roundtrip` is required: without it serde_json's
+#   float parser is not always correctly rounded, and a scenario would not be
+#   guaranteed to survive export -> import bit for bit.
+# - serde: only for the `Deserialize`/`Serialize` traits that serde_json
+#   drives. No derive macros (the schema is decoded by hand so that every
+#   problem is reported with its path), hence no proc-macro dependencies.
+#
+# Neither dependency supplies randomness, clocks or anything that reaches the
+# sample stream: they only turn text into a `Scenario` value and back.
+[dependencies]
+locsim-core = { path = "../locsim-core" }
+serde = { version = "1", default-features = false, features = ["std"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
