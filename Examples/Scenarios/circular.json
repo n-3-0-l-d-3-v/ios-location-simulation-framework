@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "name": "Orbit of 60 m radius, 4 minutes per lap",
+  "origin": {
+    "latitude": 12.9352,
+    "longitude": 77.6245
+  },
+  "altitude_m": 920.0,
+  "mode": "circular",
+  "movement": {
+    "min_speed_mps": 0.0,
+    "max_speed_mps": 3.0,
+    "max_acceleration_mps2": 0.8,
+    "max_deceleration_mps2": 1.2,
+    "max_heading_rate_dps": 60.0,
+    "radius_m": 60.0,
+    "step_distance_m": null,
+    "heading_persistence": 0.9,
+    "pause_probability": 0.01,
+    "max_pause_s": 20.0,
+    "angular_velocity_dps": 1.5,
+    "direction": "counter_clockwise",
+    "start_phase_deg": 90.0,
+    "speed_change_interval_s": 30.0,
+    "max_displacement_per_sample_m": null
+  },
+  "noise": {
+    "position_noise_m": 0.0,
+    "max_position_offset_m": 0.0,
+    "speed_noise_mps": 0.0,
+    "heading_noise_deg": 0.0,
+    "accuracy_noise_m": 0.0,
+    "drift_rate_mps": 0.0,
+    "position_correlation_time_s": 0.0,
+    "max_offset_rate_mps": 0.0
+  },
+  "horizontal_accuracy_m": 5.0,
+  "vertical_accuracy_m": 8.0,
+  "update_interval_s": 1.0,
+  "seed": "12345",
+  "route": null,
+  "playback": {
+    "speed": 1.0,
+    "looping": false,
+    "reverse": false
+  }
+}

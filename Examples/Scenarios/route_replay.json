@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "name": "Replay of a recorded walk",
+  "origin": {
+    "latitude": 12.9352,
+    "longitude": 77.6245
+  },
+  "altitude_m": 920.0,
+  "mode": "route_replay",
+  "movement": {
+    "min_speed_mps": 0.0,
+    "max_speed_mps": 1.9,
+    "max_acceleration_mps2": 0.48,
+    "max_deceleration_mps2": 0.38,
+    "max_heading_rate_dps": 8.4,
+    "radius_m": 51.0,
+    "step_distance_m": null,
+    "heading_persistence": 0.0,
+    "pause_probability": 0.0,
+    "max_pause_s": 0.0,
+    "angular_velocity_dps": null,
+    "direction": "clockwise",
+    "start_phase_deg": 0.0,
+    "speed_change_interval_s": 0.0,
+    "max_displacement_per_sample_m": null
+  },
+  "noise": {
+    "position_noise_m": 1.5,
+    "max_position_offset_m": 8.0,
+    "speed_noise_mps": 0.1,
+    "heading_noise_deg": 4.0,
+    "accuracy_noise_m": 0.8,
+    "drift_rate_mps": 0.05,
+    "position_correlation_time_s": 6.0,
+    "max_offset_rate_mps": 1.0
+  },
+  "horizontal_accuracy_m": 5.0,
+  "vertical_accuracy_m": 8.0,
+  "update_interval_s": 1.0,
+  "seed": "12345",
+  "route": {
+    "name": "Recorded walk, 40 s",
+    "points": [
+      {
+        "elapsed_ns": 0,
+        "coordinate": {
+          "latitude": 12.9352,
+          "longitude": 77.6245
+        },
+        "altitude_m": 920.0
+      },
+      {
+        "elapsed_ns": 4000000000,
+        "coordinate": {
+          "latitude": 12.9352138,
+          "longitude": 77.6245118
+        },
+        "altitude_m": 920.5
+      },
+      {
+        "elapsed_ns": 8000000000,
+        "coordinate": {
+          "latitude": 12.935237,
+          "longitude": 77.62454
+        },
+        "altitude_m": 921.0
+      },
+      {
+        "elapsed_ns": 12000000000,
+        "coordinate": {
+          "latitude": 12.9352605,
+          "longitude": 77.6245815
+        },
+        "altitude_m": 921.5
+      },
+      {
+        "elapsed_ns": 16000000000,
+        "coordinate": {
+          "latitude": 12.9352819,
+          "longitude": 77.6246283
+        },
+        "altitude_m": 922.0
+      },
+      {
+        "elapsed_ns": 20000000000,
+        "coordinate": {
+          "latitude": 12.935295,
+          "longitude": 77.6246781
+        },
+        "altitude_m": 922.5
+      },
+      {
+        "elapsed_ns": 24000000000,
+        "coordinate": {
+          "latitude": 12.935295,
+          "longitude": 77.624726
+        },
+        "altitude_m": 923.0
+      },
+      {
+        "elapsed_ns": 28000000000,
+        "coordinate": {
+          "latitude": 12.9352862,
+          "longitude": 77.6247768
+        },
+        "altitude_m": 923.5
+      },
+      {
+        "elapsed_ns": 32000000000,
+        "coordinate": {
+          "latitude": 12.9352824,
+          "longitude": 77.6248209
+        },
+        "altitude_m": 924.0
+      },
+      {
+        "elapsed_ns": 36000000000,
+        "coordinate": {
+          "latitude": 12.9352849,
+          "longitude": 77.6248503
+        },
+        "altitude_m": 924.5
+      },
+      {
+        "elapsed_ns": 40000000000,
+        "coordinate": {
+          "latitude": 12.9352874,
+          "longitude": 77.6248648
+        },
+        "altitude_m": 925.0
+      }
+    ]
+  },
+  "playback": {
+    "speed": 1.0,
+    "looping": false,
+    "reverse": false
+  }
+}

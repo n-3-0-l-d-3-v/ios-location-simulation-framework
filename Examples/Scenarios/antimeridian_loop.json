@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "name": "Looping circuit across the antimeridian",
+  "origin": {
+    "latitude": -16.8,
+    "longitude": 180.0
+  },
+  "altitude_m": 15.0,
+  "mode": "route_replay",
+  "movement": {
+    "min_speed_mps": 0.0,
+    "max_speed_mps": 2.7,
+    "max_acceleration_mps2": 0.034,
+    "max_deceleration_mps2": 0.034,
+    "max_heading_rate_dps": 2.2,
+    "radius_m": 110.0,
+    "step_distance_m": null,
+    "heading_persistence": 0.0,
+    "pause_probability": 0.0,
+    "max_pause_s": 0.0,
+    "angular_velocity_dps": null,
+    "direction": "clockwise",
+    "start_phase_deg": 0.0,
+    "speed_change_interval_s": 0.0,
+    "max_displacement_per_sample_m": null
+  },
+  "noise": {
+    "position_noise_m": 0.0,
+    "max_position_offset_m": 0.0,
+    "speed_noise_mps": 0.0,
+    "heading_noise_deg": 0.0,
+    "accuracy_noise_m": 0.0,
+    "drift_rate_mps": 0.0,
+    "position_correlation_time_s": 0.0,
+    "max_offset_rate_mps": 0.0
+  },
+  "horizontal_accuracy_m": 5.0,
+  "vertical_accuracy_m": 8.0,
+  "update_interval_s": 1.0,
+  "seed": "12345",
+  "route": {
+    "name": "Circuit across the 180th meridian",
+    "points": [
+      {
+        "elapsed_ns": 0,
+        "coordinate": {
+          "latitude": -16.7992771,
+          "longitude": 180.0
+        },
+        "altitude_m": null
+      },
+      {
+        "elapsed_ns": 20000000000,
+        "coordinate": {
+          "latitude": -16.799374,
+          "longitude": -179.9996248
+        },
+        "altitude_m": null
+      },
+      {
+        "elapsed_ns": 40000000000,
+        "coordinate": {
+          "latitude": -16.7996386,
+          "longitude": -179.9993501
+        },
+        "altitude_m": null
+      },
+      {
+        "elapsed_ns": 60000000000,
+        "coordinate": {
+          "latitude": -16.8,
+          "longitude": -179.9992495
+        },
+        "altitude_m": null
+      },
+      {
+        "elapsed_ns": 80000000000,
+        "coordinate": {
+          "latitude": -16.8003614,
+          "longitude": -179.9993501
+        },
+        "altitude_m": null
+      },
+      {
+        "elapsed_ns": 100000000000,
+        "coordinate": {
+          "latitude": -16.800626,
+          "longitude": -179.9996248
+        },
+        "altitude_m": null
+      },
+      {
+        "elapsed_ns": 120000000000,
+        "coordinate": {
+          "latitude": -16.8007229,
+          "longitude": 180.0
+        },
+        "altitude_m": null
+      },
+      {
+        "elapsed_ns": 140000000000,
+        "coordinate": {
+          "latitude": -16.800626,
+          "longitude": 179.9996248
+        },
+        "altitude_m": null
+      },
+      {
+        "elapsed_ns": 160000000000,
+        "coordinate": {
+          "latitude": -16.8003614,
+          "longitude": 179.9993501
+        },
+        "altitude_m": null
+      },
+      {
+        "elapsed_ns": 180000000000,
+        "coordinate": {
+          "latitude": -16.8,
+          "longitude": 179.9992495
+        },
+        "altitude_m": null
+      },
+      {
+        "elapsed_ns": 200000000000,
+        "coordinate": {
+          "latitude": -16.7996386,
+          "longitude": 179.9993501
+        },
+        "altitude_m": null
+      },
+      {
+        "elapsed_ns": 220000000000,
+        "coordinate": {
+          "latitude": -16.799374,
+          "longitude": 179.9996248
+        },
+        "altitude_m": null
+      },
+      {
+        "elapsed_ns": 240000000000,
+        "coordinate": {
+          "latitude": -16.7992771,
+          "longitude": 180.0
+        },
+        "altitude_m": null
+      }
+    ]
+  },
+  "playback": {
+    "speed": 1.0,
+    "looping": true,
+    "reverse": false
+  }
+}
