@@ -84,6 +84,34 @@
 //! Nothing is promised across a `stop` and a later `start`: like the core
 //! provider, a new session may start at any time.
 //!
+//! # The watchdog
+//!
+//! Two things are watched while a run is running. Neither ends the run or
+//! starts a restart: they make the health `Degraded` and say why.
+//!
+//! **Stall.** The run is stalled when nothing has been handed on for longer
+//! than `stall_after_s`, measured between the times passed to calls: from
+//! the call that last handed on a sample (or that started, restarted or
+//! resumed the run) to the latest call. It is evaluated by `check`, and by
+//! a `poll` that yields nothing. It is not evaluated while paused, and
+//! pausing clears it: nothing is expected then. The report says so twice,
+//! as a cause and as `Emission::Stalled`, because the lifecycle still says
+//! running. A stall can only be noticed by a call; if nothing calls the
+//! supervisor, nothing is noticed.
+//!
+//! **Falling behind.** The provider counts the tick slots a late poll
+//! skipped. After every poll that produced a sample or an error the
+//! supervisor reads that count and takes the increase. A poll that hands on
+//! a sample advances the run by that increase plus one slot. Slots are
+//! grouped into consecutive windows: a window closes at the first sample
+//! with which the slots since the last close reach `missed_window_ticks`.
+//! (A late poll can carry a window past that length; the excess is not
+//! carried into the next.) The run is falling behind as soon as the missed
+//! slots in the open window exceed `max_missed_in_window`, without waiting
+//! for the window to close, and stops being so only when a window closes
+//! within the limit. Paused time adds no slots, so a window continues
+//! across a pause. A new run starts with an empty window.
+//!
 //! # One place for state, totals and events
 //!
 //! Every event passes through [`Supervisor::record`], and the cumulative
@@ -97,7 +125,7 @@ use crate::report::{Cause, Emission, HealthReport, Totals};
 use locsim_core::domain::{
     HealthState, InvalidTransition, SimulationState, SyntheticLocation, Timestamp,
 };
-use locsim_core::provider::{LocationProvider, ProviderError, ProviderStatus};
+use locsim_core::provider::{LocationProvider, ProviderError, ProviderStatus, SimulationProvider};
 use locsim_core::scheduler::ScheduleError;
 use locsim_core::validation::ValidationError;
 
@@ -142,6 +170,14 @@ struct Run {
     /// The wrapped provider's missed-tick count as last read.
     missed: u64,
     last_sample: Option<SyntheticLocation>,
+    /// Time of the call that last handed on a sample, or that started,
+    /// restarted or resumed the run.
+    last_progress_at: Option<Timestamp>,
+    stalled: bool,
+    /// Tick slots, and missed ones among them, since the window opened.
+    window_slots: u64,
+    window_missed: u64,
+    falling_behind: bool,
     /// Set for a run started by a recovery, until it has proved stable.
     /// Holds the timestamp of its first sample once there is one.
     probation: Option<Option<Timestamp>>,
@@ -227,7 +263,8 @@ impl<P: LocationProvider> Supervisor<P> {
 
     /// Lets the supervisor act on the time without asking for a sample: a
     /// restart attempt that has come due is made (the new run is started
-    /// but not polled). Returns the state afterwards.
+    /// but not polled), and a running run is checked for a stall. Returns
+    /// the state afterwards.
     ///
     /// Nothing in this crate calls it. Whoever owns a timer does.
     pub fn check(&mut self, now: Timestamp) -> HealthReport {
@@ -237,6 +274,7 @@ impl<P: LocationProvider> Supervisor<P> {
                 self.attempt_restart(now);
             }
         }
+        self.watch_for_stall(now);
         self.announce(now);
         self.health()
     }
@@ -257,6 +295,12 @@ impl<P: LocationProvider> Supervisor<P> {
         if !self.lifecycle.has_run() {
             return causes;
         }
+        if self.run.stalled {
+            causes.push(Cause::Stalled);
+        }
+        if self.run.falling_behind {
+            causes.push(Cause::FallingBehind);
+        }
         if self.run.probation.is_some() {
             causes.push(Cause::Probation);
         }
@@ -275,8 +319,22 @@ impl<P: LocationProvider> Supervisor<P> {
 
     fn emission(&self) -> Emission {
         match self.lifecycle {
+            Lifecycle::Running if self.run.stalled => Emission::Stalled {
+                silent_for_ns: self.silent_for_ns(),
+            },
             Lifecycle::Running => Emission::Flowing,
             _ => Emission::NotExpected,
+        }
+    }
+
+    /// Time from the last progress of the run to the latest call.
+    fn silent_for_ns(&self) -> i64 {
+        match (self.observed_at, self.run.last_progress_at) {
+            (Some(latest), Some(progress)) => {
+                let silent = latest.as_nanos() as i128 - progress.as_nanos() as i128;
+                silent.clamp(0, i64::MAX as i128) as i64
+            }
+            _ => 0,
         }
     }
 
@@ -384,7 +442,10 @@ impl<P: LocationProvider> Supervisor<P> {
 
     fn begin_run(&mut self, at: Timestamp, recovery_attempt: Option<u32>) {
         self.run_number = self.run_number.saturating_add(1);
-        self.run = Run::default();
+        self.run = Run {
+            last_progress_at: self.observed_at,
+            ..Run::default()
+        };
         self.lifecycle = Lifecycle::Running;
         self.record(at, EventKind::RunStarted { recovery_attempt });
     }
@@ -503,9 +564,54 @@ impl<P: LocationProvider> Supervisor<P> {
         self.backoff = None;
     }
 
-    /// Reads the wrapped provider's missed-tick count into the run.
-    fn read_missed(&mut self) {
-        self.run.missed = self.provider.status().missed_ticks;
+    /// Reads the wrapped provider's missed-tick count into the run and
+    /// returns by how much it grew.
+    fn read_missed(&mut self) -> u64 {
+        let missed = self.provider.status().missed_ticks;
+        let grew = missed.saturating_sub(self.run.missed);
+        self.run.missed = missed;
+        grew
+    }
+
+    /// Accounts for a sample just handed on: the slots it advanced the run
+    /// by, `missed` of them skipped, and the verdict on the window.
+    fn note_slots(&mut self, at: Timestamp, missed: u64) {
+        let run = &mut self.run;
+        run.window_slots = run.window_slots.saturating_add(missed).saturating_add(1);
+        run.window_missed = run.window_missed.saturating_add(missed);
+        let (slots, in_window) = (run.window_slots, run.window_missed);
+        let over = in_window > self.limits.max_missed_in_window;
+        let closes = slots >= self.limits.missed_window_ticks;
+        if over && !self.run.falling_behind {
+            self.run.falling_behind = true;
+            self.record(
+                at,
+                EventKind::FallingBehind {
+                    missed: in_window,
+                    slots,
+                },
+            );
+        }
+        if closes {
+            if !over && self.run.falling_behind {
+                self.run.falling_behind = false;
+                self.record(at, EventKind::CaughtUp);
+            }
+            self.run.window_slots = 0;
+            self.run.window_missed = 0;
+        }
+    }
+
+    /// Marks the run stalled if nothing has been handed on for too long.
+    fn watch_for_stall(&mut self, at: Timestamp) {
+        if self.lifecycle != Lifecycle::Running || self.run.stalled {
+            return;
+        }
+        let silent_for_ns = self.silent_for_ns();
+        if silent_for_ns > self.limits.stall_after_ns {
+            self.run.stalled = true;
+            self.record(at, EventKind::Stalled { silent_for_ns });
+        }
     }
 
     /// Fails the run if the wrapped provider is not in the state the
@@ -527,6 +633,22 @@ impl<P: LocationProvider> Supervisor<P> {
             }),
         );
         false
+    }
+}
+
+impl Supervisor<SimulationProvider> {
+    /// [`Supervisor::new`] for the simulation provider, which additionally
+    /// checks what only it makes checkable: that the stall threshold is
+    /// longer than the scenario's update interval. A shorter one would
+    /// report a provider that is exactly on time as stalled between two
+    /// samples.
+    pub fn for_simulation(
+        provider: SimulationProvider,
+        policy: HealthPolicy,
+        sink: Box<dyn EventSink + Send>,
+    ) -> Result<Self, Vec<PolicyError>> {
+        policy.validate_for_interval(provider.scenario().update_interval_s)?;
+        Self::new(provider, policy, sink)
     }
 }
 
@@ -593,6 +715,8 @@ impl<P: LocationProvider> LocationProvider for Supervisor<P> {
             return Err(self.reject(now, Operation::Pause, error));
         }
         self.lifecycle = Lifecycle::Paused;
+        // Nothing is expected of a paused run.
+        self.run.stalled = false;
         self.record(now, EventKind::Paused);
         self.verify(now);
         self.announce(now);
@@ -609,6 +733,7 @@ impl<P: LocationProvider> LocationProvider for Supervisor<P> {
             return Err(self.reject(now, Operation::Resume, error));
         }
         self.lifecycle = Lifecycle::Running;
+        self.run.last_progress_at = self.observed_at;
         self.record(now, EventKind::Resumed);
         self.verify(now);
         self.announce(now);
@@ -642,11 +767,13 @@ impl<P: LocationProvider> LocationProvider for Supervisor<P> {
                 Err(error)
             }
             Ok(None) => {
-                self.verify(now);
+                if self.verify(now) {
+                    self.watch_for_stall(now);
+                }
                 Ok(None)
             }
             Ok(Some(sample)) => {
-                self.read_missed();
+                let missed = self.read_missed();
                 match self.last_forwarded {
                     Some(previous) if sample.timestamp <= previous => {
                         self.run.withheld = self.run.withheld.saturating_add(1);
@@ -662,6 +789,11 @@ impl<P: LocationProvider> LocationProvider for Supervisor<P> {
                         self.run.forwarded = self.run.forwarded.saturating_add(1);
                         self.run.last_sample = Some(sample);
                         self.last_forwarded = Some(sample.timestamp);
+                        self.run.last_progress_at = self.observed_at;
+                        if std::mem::take(&mut self.run.stalled) {
+                            self.record(now, EventKind::StallCleared);
+                        }
+                        self.note_slots(now, missed);
                         self.note_progress(now, sample.timestamp);
                         self.verify(now);
                         Ok(Some(sample))
