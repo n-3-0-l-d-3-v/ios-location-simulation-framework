@@ -21,6 +21,11 @@ tooling is needed for the simulation core.
   any crate without a written justification in that crate's `Cargo.toml`
   (`locsim-scenario` carries one for `serde` and `serde_json`). Randomness
   comes only from `rng::Rng` (seeded).
+- Persistence: `cargo test -p locsim-store -- --nocapture` prints the
+  measured figures. `tests/crash.rs` starts the test binary as a child
+  process and kills it; `tests/platform.rs` has a Windows module and a Unix
+  module, and only the one for the host is compiled. Keep high-volume
+  corruption tests in memory: thousands of real file writes are slow.
 - Scenario documents: `cargo test -p locsim-scenario`. The files in
   `Examples/Scenarios/` must stay byte-identical to their own export; a test
   checks it, and a new file there must be added to

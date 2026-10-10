@@ -1,4 +1,4 @@
-# Ticket history: T00–T08
+# Ticket history: T00–T09
 
 What each completed ticket was for, what it built, what it decided, how it
 was tested, what it left open, and which commits it consists of.
@@ -10,7 +10,7 @@ How to read the evidence:
 - **Test counts at the close of each ticket** are *reported*: taken from
   `PROGRESS.md` as written at the time, not re-run at those commits. Only the
   final count (273 at `1be8852`) was re-run when this file was written. The
-  T08 counts were observed in the session that did the work.
+  T08 and T09 counts were observed in the session that did the work.
 - **Statistics** (pairs re-checked, closest approach to a limit, and so on)
   are *reported* from test output. They are printed by the tests themselves
   and can be reproduced with `cargo test -- --nocapture`.
@@ -245,6 +245,67 @@ the audit were corrected (commits `bb2a354`, `0b603cd`).
 
 ---
 
+## T09 — Persistence
+
+- **Purpose.** Keep a scenario, and what a simulation last emitted, across
+  a restart, without a failed or interrupted write destroying what was there.
+- **How it was run.** Design first: an investigation of the code, a written
+  proposal, the decisions of the project owner, two technical details
+  resolved in an addendum (file integrity, atomic replacement), then six
+  stages.
+- **Decided by the project owner.** Store (A) the scenario and (B) the
+  last-known output; defer (C) checkpoint/resume to a separate, unowned
+  ticket; leave configuration and preferences out; `locsim-store` for files
+  with the record codec in `locsim-scenario`; no backup generation; FNV-1a
+  64 fingerprint to associate a record with its scenario; an envelope with a
+  digest over the exact payload, because T08 had shown that damaged text
+  can decode as a different valid scenario; correct the stale statements.
+- **Found by reading the code before designing.** A run is a deterministic
+  function of the scenario and the whole sequence of calls, with state in
+  the schedule, the model, the noise engine, the deriver and the gate; it
+  is not a function of scenario and time. Two documents said otherwise
+  (D4; the provider section of the architecture) and so did the T08
+  hand-off in `CURRENT_STATE.md`. Exact resume is impossible from a
+  scenario and a last sample for every mode but a noise-free fixed one.
+- **Built.** In `locsim-scenario`: `record` (`LastKnown`,
+  `export_last_known`, `import_last_known`, `scenario_fingerprint`);
+  `MigrationChain` generalised with a version key; `ScenarioError` gained
+  `InvalidSample`. New crate `locsim-store`: `sha256`, `envelope`, `atomic`
+  (with a private file-operations seam), `store`, `error`. `locsim-core`:
+  no file changed.
+- **Key decisions.** D16; D4 corrected. Contract C20 added, C19 extended.
+- **Changed existing behaviour.** None in any engine or gate. In
+  `locsim-scenario`, the text of `ScenarioError::UnsupportedVersion` no
+  longer names `schema_version` (it now serves two document types).
+- **Verified against sources.** The Windows `rename` of Rust 1.98.1 read in
+  its source (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, POSIX-rename
+  fallback); the Microsoft documentation of `MoveFileExW` read for what it
+  does and does not promise.
+- **Found by tests.** A read-only record cannot be replaced on Windows (the
+  expectation written first was the opposite). The killed-writer test passes
+  even with a deliberately non-atomic replacement, so it is weak evidence
+  alone; the concurrent-reader test catches that defect. Two defects in new
+  tests, corrected by derivation: a payload length miscounted by one, and a
+  check made through the faulty file system it was meant to be independent
+  of.
+- **Tests at close (observed 2026-10-10).** 431 in the workspace: 273 core,
+  89 scenario, 69 store. Reported: 31 786 single-character changes to the
+  examples, 1 357 a different valid scenario as bare documents, none through
+  the envelope; a save failed at each of seven steps with the old record
+  intact; 40 writer processes killed with the record whole every time; 240
+  replacements under about 2 200 concurrent loads on Windows with no missing
+  or partial record; about 3.6 ms per synced save; twelve mutation checks,
+  all caught.
+- **Left open.** Nothing run on a Unix-like system, including code that only
+  compiles there. Nothing tested under power loss. On Windows the rename is
+  not confirmed durable. Checkpoint/resume unowned. One writer per
+  directory, unenforced. `rust-version` 1.75 unverified for a third crate.
+- **Commits.** `1c51a32` (record codec and fingerprint), `a7de906`
+  (envelope, SHA-256, atomic replacement), `d8ae8da` (`Store`, scenario),
+  `e93662d` (last-known in the store; not a checkpoint), `29c8342`
+  (killed-writer and platform tests), then the documentation commit that
+  closed the ticket.
+
 ## Recurring lessons
 
 - Strict comparisons plus independent arithmetic expose every rounding
@@ -255,6 +316,12 @@ the audit were corrected (commits `bb2a354`, `0b603cd`).
 - Test what is staged, not what is on disk, when committing a subset.
 - Write the commit message, read it, then commit. Never in one step with
   anything that can fail (`019ad0f`).
+- Read the code before writing the design. The scope of T09 turned on a
+  fact (a run holds unexposed state) that two documents had stated wrongly.
+- A test is itself tested: break the thing it guards and see whether it
+  notices. The killed-writer test of T09 did not notice a non-atomic rename.
+- A platform row says what was run. Code that has never been compiled for a
+  platform is not "expected to work" there; it is untested.
 - An expected number in a test is derived, not copied from the first run.
   When a new test fails, first ask whether the expectation or the code is
   wrong, and say which it was.

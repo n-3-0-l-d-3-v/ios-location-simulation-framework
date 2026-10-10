@@ -67,7 +67,7 @@ Other non-goals:
     Location Abstraction           LocationProvider trait         implemented (one provider)
     Platform Adapter               C ABI + Swift -> CLLocation    planned (T11)
     Health / Recovery              metrics, watchdog, retries     planned (T10)
-    Persistence / Storage          atomic writes, migration       planned (T09)
+    Persistence / Storage          digest envelope, atomic replace implemented (locsim-store)
 
 Assumptions (Decisions unless marked):
 
@@ -76,6 +76,9 @@ Assumptions (Decisions unless marked):
 - Anything that needs a dependency lives in its own crate on top of the
   core. So far that is `locsim-scenario` (`serde`, `serde_json`).
   **Verified** on Windows only.
+- Files are touched by one crate only, `locsim-store`, which has no
+  third-party dependency. **Verified** on Windows only; iOS is a Unix-like
+  system and that path has never run.
 - iOS will be reached through a C ABI crate and a Swift adapter. **Planned.**
   Nothing has been cross-compiled for `aarch64-apple-ios`. **Unverified** that
   the core builds for it.
@@ -106,7 +109,9 @@ Assumptions (Decisions unless marked):
 | Scenario JSON import/export, schema versioning | Implemented, tested on desktop |
 | Migration between schema versions | Mechanism implemented and tested with test-only steps; no real migration exists (only version 1) |
 | GPX import/export | Not implemented; no ticket owns it yet (T11 mentions GPX for delivery) |
-| Persistence | Planned (T09) |
+| Persistence of a scenario and of the last emitted sample (digest, atomic replacement) | Implemented, tested on Windows only; Unix path never run; power loss never tested |
+| Checkpoint / resume of a running simulation | **Not implemented; no ticket owns it.** A stored simulation can only be started again |
+| Stored configuration and preferences | Not implemented: no such types exist; expected with the application (T12) |
 | Health, watchdog, bounded recovery, structured logging | Planned (T10) |
 | C ABI, Swift adapter, `CLLocation` conversion | Planned (T11) |
 | Demo application | Planned (T12) |
@@ -133,13 +138,18 @@ in the repository. Its ticket plan is reproduced here so that it is.
 | T06 | Route engine | Route loading, interpolation, playback, pause/resume, looping, playback speed | Done |
 | T07 | Consistency engine | Consistency of speed, course, timestamps, accuracy, position | Done |
 | T08 | Scenario system | Serialisation, validation, import/export, schema versioning (JSON; migration between versions) | Done |
-| **T09** | **Persistence** | **Reliable configuration persistence and recovery: active scenario, configuration, last known state, route, preferences, schema version; atomic writes (write temporary, validate, replace)** | **Next** |
-| T10 | Health system | Health state, metrics, watchdog, bounded recovery (e.g. three retries with backoff, then FAILED), structured logging with levels | Planned |
+| T09 | Persistence | Reliable configuration persistence and recovery: active scenario, configuration, last known state, route, preferences, schema version; atomic writes (write temporary, validate, replace) | Done for the scenario (with its route and schema version) and the last-known record. Configuration and preferences: nothing to store yet. Resume: deferred, see below |
+| **T10** | **Health system** | **Health state, metrics, watchdog, bounded recovery (e.g. three retries with backoff, then FAILED), structured logging with levels** | **Next** |
 | T11 | Platform adapter | The authorised iOS delivery/test adapter; document platform limitations | Planned |
 | T12 | Test application | UI and visualisation: current location, speed, course, accuracy, mode, state, health, sample count; start/pause/resume/stop/reset/load/save; map where practical | Planned |
 | T13 | Integration testing | Whole pipeline: scenario → movement → noise → validation → consistency → scheduler → adapter → app | Planned |
 | T14 | Reliability testing | Long-duration runs, repeated start/stop, pause/resume, failure injection, corrupted configuration, memory | Planned |
 | T15 | Documentation | Architecture, compatibility, setup, testing, limitations, troubleshooting | Planned |
+
+**Unowned work, recorded so it is not lost.** Checkpoint/resume of a running
+simulation (deferred from T09 by decision; it needs engine state the core
+does not expose, see decision D16). Write-through rename on Windows.
+GPX import/export.
 
 Things the specification asks for that no ticket has delivered yet and that a
 later ticket must pick up: `TestProvider`, `DevelopmentAdapter` and

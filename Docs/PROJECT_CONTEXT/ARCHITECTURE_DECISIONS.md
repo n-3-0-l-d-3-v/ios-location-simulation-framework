@@ -21,7 +21,8 @@ Each decision says where its rationale comes from:
 Stated in `crates/locsim-core/src/lib.rs`. A module may use modules to its
 left. `consistency` uses only `domain` and `geographic`; `validation` uses
 `consistency`; `provider` wires everything. `locsim-scenario` is a second
-crate on top of the core (D14). Platform code, when it exists,
+crate on top of the core (D14) and `locsim-store` a third on top of both
+(D16). Platform code, when it exists,
 sits outside this crate and contains conversion and lifecycle only.
 
 ## D1. The core is a dependency-free Rust crate (recorded, session)
@@ -80,9 +81,16 @@ sits outside this crate and contains conversion and lifecycle only.
 - **Decision.** `TickSchedule` is a pure state machine. `LocationProvider`
   methods take `now`. Samples are stamped with the tick's ideal time
   `start + n × interval`, never with the poll time.
-- **Why.** A run is then a pure function of (scenario, start time, poll
-  times), and sample *content* does not depend on poll times at all. Tests
-  never sleep. Lateness cannot accumulate into drift.
+- **Why.** A run is then a deterministic function of the scenario and the
+  sequence of `start` / `poll` / `pause` / `resume` times. Tests never
+  sleep. Lateness cannot accumulate into drift.
+- **Corrected in T09.** This entry used to say that sample content "does not
+  depend on poll times at all". That holds only while no tick is skipped,
+  which is what `tests/fixed_pipeline.rs::punctual_polling_makes_content_independent_of_poll_jitter`
+  asserts. When a late poll skips ticks, steered trajectories, noise and
+  derived speed all change (one longer step, a longer decorrelation gap, a
+  longer interval). And a run is not a function of scenario and time alone:
+  it carries state. See `Docs/ARCHITECTURE.md`, `provider`, "State".
 - **Deviation from the specification.** The specification sketches
   `start()`, `pause()`, … without arguments; here they take the time.
 - **Backpressure.** If polling falls behind, overdue ticks are skipped and
@@ -313,12 +321,65 @@ sits outside this crate and contains conversion and lifecycle only.
 - **Uncertain.** Whether errors from `Scenario::validate` should carry line
   and column. They do not; only syntax errors do.
 
+## D16. Persistence: what is stored, where, and how (recorded, T09)
+
+Decided by the project owner on 2026-10-10 after a design review; the two
+technical details (integrity, replacement) were resolved before coding.
+
+- **Scope: A and B, not C.** (A) the scenario and (B) the last emitted
+  sample with the provider's counters are stored. (C) checkpoint/resume is
+  deferred to a separate ticket nobody owns. **Why.** A run holds state the
+  core does not expose (D4, corrected): random streams, mover state, noise
+  filters, the deriver's and the gate's history. A scenario and a last
+  sample are not enough to continue any mode but a noise-free fixed one.
+  Exposing that state is a change to the core with its own contract.
+  "Configuration" and "preferences" from the ticket text are not stored:
+  no such type exists; the application ticket can use the same store.
+- **Two ways C could be done later** (not chosen): snapshot/restore in the
+  engines; or logging the call sequence and replaying it (about 1.2 µs per
+  sample).
+- **Layout.** A new crate `locsim-store` owns files and has no third-party
+  dependency. The text form of the last-known record lives in
+  `locsim-scenario` beside the other codec. **Rejected:** file I/O inside
+  `locsim-scenario` (C19 says it opens no file); a second JSON decoder in
+  the store (duplicates or loses the strict tree); publishing the `json`
+  module (internals as API).
+- **Integrity: an envelope with SHA-256 over the exact payload.** T08's
+  damage test had shown that a changed character can decode as a different
+  valid scenario; the owner asked for this to be closed, not accepted.
+  A line header, then the payload unescaped, so the canonical document is
+  the payload byte for byte. **Rejected:** JSON inside JSON (the document
+  as an escaped string is unreadable; as a nested object the "exact bytes"
+  depend on re-serialisation); CRC-32 (misses one random corruption in 2³²
+  and loses its burst guarantee on megabyte routes); a `sha2` dependency
+  (six crates for ninety lines). The digest is for accidental damage only.
+- **Fingerprint is a different thing.** FNV-1a 64 of the exported text
+  associates a record with its scenario. Not cryptographic, not integrity.
+- **Replacement: standard library only.** Temporary file, sync, read back,
+  rename, directory sync on Unix. **What was verified:** Rust 1.98.1 renames
+  on Windows with `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, falling back to
+  a POSIX-semantics rename on access denied; Microsoft's documentation does
+  not call the replacement atomic; the standard library neither passes
+  `MOVEFILE_WRITE_THROUGH` nor can sync a directory. So on Windows the
+  rename is not confirmed durable, and that is stated, not hidden.
+  **Not chosen:** an FFI call with write-through (`unsafe`, which every
+  crate here forbids) or a `windows-sys` dependency for one flag. Either is
+  a contained follow-up if the guarantee is wanted.
+- **No backup generation, no lock file, no automatic cleanup.** A failed
+  save already keeps the old record; a backup would only guard against a
+  successful save of something unwanted. A lock goes stale after a crash.
+  Temporary files may belong to a live writer, so they are removed only on
+  request.
+- **Every save is synced.** The caller chooses how often to save.
+- **Loading never writes.** Missing is `None`; corrupt is an error; nothing
+  becomes a default.
+
 ## Decisions a future ticket will have to make
 
-- T09: what "last known simulation state" means for a provider that is a
-  pure function of time; where persistence lives; whether the private `json`
-  layer of `locsim-scenario` is exposed for other stored documents; atomic
-  replace on platforms that cannot be tested here.
+- T10: recovery can only mean a new run (D16); whether health lives in the
+  core or beside it; how backoff is expressed when nothing sleeps (D4); the
+  log sink and what may be logged (no coordinates above debug level).
+- Unowned: checkpoint/resume (D16); `MOVEFILE_WRITE_THROUGH` on Windows.
 - T10: whether recovery re-creates the run or resumes it, and what the
   deriver and validator state should be afterwards.
 - T11: everything in D13.

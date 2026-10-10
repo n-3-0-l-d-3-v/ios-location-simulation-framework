@@ -4,11 +4,12 @@ The invariants future tickets must preserve. Each names where it is enforced
 and which tests would fail if it broke. Paths are relative to
 `crates/locsim-core/`. Test references are `file::test_function`.
 
-Paths in C19 are relative to `crates/locsim-scenario/`.
+Paths in C19 are relative to `crates/locsim-scenario/`, in C20 to
+`crates/locsim-store/`.
 
 References in C1–C18 were checked to exist at commit `1be8852` (2026-10-09);
-T08 changed no file of `locsim-core`. References in C19 were checked at
-`e6bcbf2` (2026-10-10). If one no longer resolves, the code moved: find the
+T08 and T09 changed no file of `locsim-core`. References in C19 and C20 were
+checked at `29c8342` (2026-10-10). If one no longer resolves, the code moved: find the
 new home before concluding the contract is gone.
 
 **If a change makes one of these tests fail, the default assumption is that
@@ -295,6 +296,21 @@ dependencies and without knowledge of JSON.
   an edit to version 1 and never a tolerant decoder. No historical schema is
   invented: a migration step exists only for a version that was released.
 - **Strings only.** The crate opens no file.
+- **Two document types (since T09).** The last-known record
+  (`export_last_known` / `import_last_known`, `record_version`) follows
+  every rule above: required members, no unknown or duplicate members,
+  exact types, its own version on the same chain mechanism, no invented
+  history. `null` speed or course means unknown and is never read or
+  written as zero. A record must hold a sample that passes
+  `SyntheticLocation::validate`. `scenario_fingerprint` is FNV-1a 64 of the
+  exported text: an association, not a security or integrity measure, and
+  it must stay documented as such. Tests:
+  `src/record/tests.rs::arbitrary_records_round_trip_bit_exactly_and_canonically`,
+  `src/record/tests.rs::unknown_speed_and_course_stay_unknown_and_zero_stays_zero`,
+  `src/record/tests.rs::every_member_refuses_every_json_type_it_does_not_take`,
+  `src/record/tests.rs::a_record_must_hold_a_sample_that_was_fit_to_emit`,
+  `src/record/tests.rs::fnv_1a_64_matches_the_published_vectors`,
+  `tests/last_known.rs::fingerprints_are_those_of_the_exported_text_and_tell_the_examples_apart`.
 - Enforced in: `src/lib.rs` (`import_with`, `export_scenario`),
   `src/json.rs` (`parse`, `find_duplicates`, the `Serialize` impl),
   `src/migrate.rs` (`MigrationChain`), `src/schema.rs`.
@@ -321,3 +337,73 @@ dependencies and without knowledge of JSON.
   keys silently); drop `float_roundtrip` (floats stop reading back exactly);
   derive `Deserialize` with defaults; accept a JSON number as a seed; upgrade
   `serde_json` without running the float and round-trip tests.
+
+## C20. Stored records: verified before use, replaced or left alone
+
+Added by T09. The crate is `locsim-store`. It is the only crate that touches
+files, and it has no third-party dependency.
+
+- **Stored is not resumable.** What is stored is a scenario and the last
+  emitted sample. Neither, nor both, can continue a run; nothing may claim
+  or imply otherwise. Checkpoint/resume is a separate, unowned ticket and
+  would need engine state the core does not expose.
+- **Digest before meaning.** A stored file is an envelope whose payload is
+  the exported document byte for byte. Kind of file, envelope version,
+  header, length and SHA-256 are checked, in that order, before the payload
+  is decoded. A payload that fails the digest never reaches a codec.
+- **Loading never writes.** No file is `Ok(None)`: absence is not an error
+  and not corruption. A file that cannot be loaded is an error that says
+  why; it is never repaired, moved, deleted, or turned into a default. A
+  read error is an I/O error, neither missing nor corrupt.
+- **Saving never damages.** A value is validated and encoded before the
+  disk is touched; an invalid value is not written. The record is not
+  opened or written before the rename. A failure at any earlier step leaves
+  the previous record byte-identical and removes the temporary file, or
+  reports that it could not. A directory-sync failure after the rename is
+  reported as "replaced, not confirmed durable", never as a plain failure
+  and never as success.
+- **Claims match evidence.** Visibility and durability are stated
+  separately and per platform. Atomic visibility is claimed for POSIX
+  `rename` only; for Windows it is "observed, not documented". Durability is
+  "requested", and on Windows not requested for the change of name
+  (`DIRECTORY_SYNC`). Nothing is claimed about power loss. Unix behaviour is
+  marked untested until it is run.
+- **One writer.** Saves through one `Store` are serialised; several writers
+  per directory are unsupported. No lock file, no backup generation, no
+  automatic removal of temporary files.
+- **Two different numbers.** The SHA-256 digest says a file is the bytes
+  that were written; it is unkeyed and detects accidents only. The FNV
+  fingerprint says which scenario a record belongs to. Neither does the
+  other's job and neither is a security measure.
+- Enforced in: `src/store.rs` (`Store`, `interpret`), `src/envelope.rs`
+  (`seal`, `open`), `src/atomic.rs` (`replace`), `src/sha256.rs`,
+  `src/error.rs`.
+- Tests: `src/atomic.rs::a_failure_at_any_step_before_the_replacement_keeps_the_old_record`,
+  `src/atomic.rs::a_failure_at_any_step_before_the_replacement_creates_no_record`,
+  `src/atomic.rs::a_directory_sync_failure_says_the_record_was_replaced`,
+  `src/atomic.rs::a_temporary_file_that_cannot_be_removed_is_reported_with_the_first_error`,
+  `src/atomic.rs::running_out_of_temporary_names_is_an_error_not_an_overwrite`,
+  `src/envelope.rs::every_single_bit_flip_anywhere_in_the_file_is_detected`,
+  `src/envelope.rs::every_truncation_is_detected`,
+  `src/envelope.rs::the_header_has_exactly_one_spelling`,
+  `src/sha256.rs::matches_the_fips_180_4_vectors`,
+  `src/sha256.rs::matches_another_implementation_at_every_length_up_to_300`,
+  `src/store/tests.rs::a_save_that_fails_at_any_step_leaves_the_stored_scenario_loadable`,
+  `src/store/tests.rs::damage_that_the_document_codec_accepts_is_caught_by_the_digest`,
+  `src/store/tests.rs::the_digest_is_checked_before_the_document`,
+  `src/store/tests.rs::a_read_error_is_an_io_error_not_a_missing_or_corrupt_record`,
+  `tests/scenario_store.rs::nothing_stored_is_none_and_loading_writes_nothing`,
+  `tests/scenario_store.rs::an_empty_file_is_corrupt_not_missing`,
+  `tests/scenario_store.rs::a_corrupt_record_is_left_alone_and_can_be_replaced_by_a_save`,
+  `tests/scenario_store.rs::an_invalid_scenario_is_refused_and_the_stored_one_is_kept`,
+  `tests/scenario_store.rs::saves_through_one_store_are_serialised_and_readers_see_whole_records`,
+  `tests/last_known_store.rs::the_stored_record_cannot_continue_a_run`,
+  `tests/last_known_store.rs::a_record_from_another_scenario_loads_and_its_fingerprint_does_not_match`,
+  `tests/crash.rs::a_writer_killed_at_any_moment_leaves_a_whole_valid_record`,
+  `tests/platform.rs` (Windows module run; Unix module **never run**).
+- Do not: write a record in place; load a payload before its digest is
+  checked; treat a missing file as corrupt or a corrupt file as missing;
+  delete or overwrite a corrupt record on load; add a default for a missing
+  record inside the store; describe the record as a checkpoint; describe
+  the digest as protection against tampering; upgrade a platform row in the
+  documentation without a run on that platform.

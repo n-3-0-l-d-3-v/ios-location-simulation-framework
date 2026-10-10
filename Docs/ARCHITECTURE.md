@@ -20,7 +20,7 @@ the index of all context documents is
     Location Abstraction           LocationProvider trait          [implemented]
     Platform Adapter               C ABI + Swift → CLLocation
     Health / Recovery              metrics, watchdog, bounded retries
-    Persistence / Storage          atomic writes, schema migration
+    Persistence / Storage          scenario + last-known record, digest, atomic replace [implemented, separate crate]
 
 Cross-cutting: `domain` (canonical types) [implemented], `rng` (seeded PRNG)
 [implemented], `scheduler` [implemented], `validation` (field, timestamp, speed,
@@ -29,7 +29,8 @@ implemented).
 
 Dependency rule: a layer may import only layers below it plus `domain`/`rng`.
 The platform adapter contains conversion and lifecycle code only.
-`locsim-scenario` depends on the core; the core depends on nothing.
+`locsim-scenario` depends on the core; `locsim-store` depends on both; the
+core depends on nothing.
 
 ## Language and packaging
 
@@ -37,6 +38,7 @@ The platform adapter contains conversion and lifecycle code only.
 |---|---|---|
 | Simulation core | Rust crate `locsim-core`, zero dependencies, `#![forbid(unsafe_code)]` | Testable on any desktop OS without an iPhone; bit-reproducible seeded output; cross-compiles to iOS |
 | Scenario documents | Rust crate `locsim-scenario`; depends on `locsim-core`, `serde` (no derive) and `serde_json` (`float_roundtrip`); `#![forbid(unsafe_code)]` | Keeps the core dependency-free while using a widely tested JSON reader and writer; see "Scenario documents" below |
+| Persistence | Rust crate `locsim-store`; depends on `locsim-core` and `locsim-scenario`, nothing else; `#![forbid(unsafe_code)]` | The only crate that touches files; SHA-256 and atomic replacement written with the standard library; see "Persistence" below |
 | Platform boundary | C ABI crate (`locsim-ffi`, T11) | The only stable interface Swift/Obj-C can consume |
 | iOS adapter + demo app | Swift (T11/T12) | Core Location and UI are Apple-only APIs |
 
@@ -500,9 +502,28 @@ Design decisions worth knowing:
   from emitted positions → validate → emit (see "Pipeline order").
   Models are sampled at *simulated* time `start + tick index × interval`,
   which stands still while paused, so a mover resumes where it was instead
-  of leaping ahead; samples are stamped with wall time.
-  Samples are stamped with the tick's ideal time, so the emitted stream does
-  not depend on poll punctuality.
+  of leaping ahead.
+  A sample is stamped with its tick's ideal time on the schedule
+  (`schedule start + index × interval`; a `resume` moves the schedule start
+  forward by the paused time), not with the time of the poll. As long as no
+  tick is skipped, the emitted stream therefore does not depend on how
+  punctually the provider is polled
+  (`tests/fixed_pipeline.rs::punctual_polling_makes_content_independent_of_poll_jitter`).
+  When a poll is late by more than one interval, the overdue ticks are
+  skipped, and the stream *does* change: a steered model takes one longer
+  step with the same number of random draws, noise decorrelates over the
+  longer gap, and speed is derived over the longer interval.
+- **State.** A run is not a function of scenario and time. It is a
+  deterministic function of the scenario and the whole sequence of
+  `start` / `poll` / `pause` / `resume` calls, and it holds state that
+  shapes every later sample: the run's start, the schedule (next index,
+  shifted start), the movement model (for steered modes its position,
+  speed, heading and three random streams; for circular and route replay
+  the time of the first sample), the noise engine (five random channels and
+  their filter state), the previous emitted fix in the deriver, and the last
+  accepted sample and interval in the gate. None of it is exposed or
+  serialisable. Consequently a run can be reproduced by replaying the same
+  calls, but it cannot be resumed from a stored sample (see "Persistence").
 - Failure behaviour: an invalid scenario is rejected at `start` and the
   provider stays `Idle`. If a sample cannot be produced or fails validation,
   nothing is emitted, `failed_count` increments and the state becomes `Error`
@@ -514,7 +535,7 @@ Design decisions worth knowing:
 ## Scenario documents (`locsim-scenario`, T08)
 
 A separate crate that turns text into a validated `Scenario` and back. It
-reads and writes strings; it opens no file (persistence is T09). The core
+reads and writes strings; it opens no file (files are `locsim-store`). The core
 does not know it exists.
 
     text ── parse ── version ── migrate ── decode ── Scenario::validate ── Scenario
@@ -623,6 +644,157 @@ altitude), `antimeridian_loop` (a closed, looping circuit centred on the
 180th meridian) and `high_latitude` (a walk 5.6 km from the North Pole).
 `tests/examples.rs` imports each, checks it is byte-identical to its own
 export, and runs it through `SimulationProvider` and the final gate.
+
+### The last-known record (T09)
+
+A second document type in the same crate, with its own version
+(`record_version`, currently 1) on the same migration-chain mechanism.
+
+- `LastKnown { scenario_fingerprint, sample, state, sample_count,
+  failed_count, missed_ticks, trajectory_complete }`.
+  `LastKnown::new(fingerprint, sample, &status)` refuses a status that names
+  another sample as the latest.
+- `export_last_known` / `import_last_known`: every member required, unknown
+  and duplicate members refused, exact types. `timestamp_ns` is an integer,
+  the sample's own timestamp unchanged; `speed_mps` and `course_deg` are a
+  number or `null`, and `null` is "unknown", never zero; the three `u64`
+  counters are canonical decimal strings; the fingerprint is 16 lower-case
+  hexadecimal digits. The sample must pass `SyntheticLocation::validate`
+  and `sample_count` must be at least one, on export and on import.
+- `scenario_fingerprint(&scenario)`: FNV-1a 64 over the exported text. It
+  tells whether a record belongs to a scenario. It is not cryptographic and
+  not a file-integrity check.
+- The record is one emitted sample. It is not a checkpoint.
+
+## Persistence (`locsim-store`, T09)
+
+The only crate that touches files. Standard library only.
+
+### Scope
+
+| | What | In T09 |
+|---|---|---|
+| A | Scenario persistence | Yes: `save_scenario` / `load_scenario` |
+| B | Last-known output: the latest emitted sample with the provider's counters and the scenario fingerprint | Yes: `save_last_known` / `load_last_known` |
+| C | Checkpoint / resume of a running simulation | **No.** Deferred; no ticket owns it |
+
+B is not C. Resuming needs the state listed under `provider` ("State"),
+which the core does not expose. A provider started after a restart is a new
+run from the scenario's beginning; a test shows it for five modes
+(`tests/last_known_store.rs::the_stored_record_cannot_continue_a_run`).
+"Configuration" and "preferences" in the ticket text are not stored: no such
+type exists yet.
+
+### Interface
+
+    Store::open(directory)                 // must exist; creates nothing
+    store.save_scenario(&scenario)         store.load_scenario()   -> Option<Scenario>
+    store.save_last_known(&record)         store.load_last_known() -> Option<LastKnown>
+    store.stale_temporaries()              store.remove_stale_temporaries()
+
+Files: `scenario.locsim`, `last_known.locsim`. The two are saved separately
+and nothing keeps them in step; the fingerprint in the record tells whether
+it belongs to the stored scenario. A record from another scenario loads
+normally and does not match.
+
+### File format: the envelope
+
+    locsim-store 1
+    payload-sha256 <64 lower-case hexadecimal digits>
+    payload-bytes <length of the payload in bytes>
+    <empty line>
+    <payload, byte for byte>
+
+- The payload is the exported document, unescaped and unchanged. Removing
+  the first four lines gives a plain scenario (or record) document, and
+  `sha256sum` over it prints the header's digest.
+- The header has exactly one spelling (line feeds, single spaces, lower-case
+  hexadecimal, canonical decimals). Anything else is refused.
+- Opening checks, in order: kind of file, envelope version, header, length,
+  digest. Only then is the payload decoded.
+- **Why a digest.** Validation is not integrity: a document codec cannot
+  tell `1.8` from `1.3`. Of 31 786 single-character changes to the example
+  scenarios, 1 357 produced a different *valid* scenario when applied to the
+  bare document, and none got through the envelope.
+- **What the digest is not.** It is unkeyed: it detects accidental damage
+  (a random change goes unnoticed with probability about 2⁻²⁵⁶), not
+  deliberate change. It is unrelated to the scenario fingerprint.
+- SHA-256 is implemented in the crate (FIPS 180-4), checked against the
+  standard's vectors, Python's `hashlib` at every length from 0 to 300
+  bytes, and `sha256sum`.
+- A different digest or header would be envelope version 2. The payload has
+  its own version, handled by its codec; an older schema is migrated in
+  memory on load and the file is not rewritten until the next save.
+- A stored file is for machines; it is readable, but an edited payload fails
+  the digest. To change a stored scenario, import the document and save it.
+
+### Replacing a record
+
+1. Validate and encode in memory. An invalid value never reaches the disk.
+2. Create `.<file>.tmp-<process id>-<counter>` in the same directory with
+   `create_new`. An existing name is skipped and never touched; after 16
+   attempts the save fails.
+3. Write, `sync_all`, close.
+4. Read the temporary file back and compare with the intended bytes.
+5. `rename` over the record.
+6. Sync the directory (Unix-like systems only).
+
+The record is not opened or written before step 5. A failure in steps 2–5
+leaves the old record and removes the temporary file; if the removal fails,
+the original error is returned with the leftover named. A failure in step 6
+is reported as its own case (`StoreError::record_was_replaced()`): the new
+record is in place, the change of name is not confirmed on disk.
+
+| | Unix-like | Windows |
+|---|---|---|
+| A failed save leaves the old record | yes | yes |
+| A reader never finds a half-written record | yes | yes |
+| A reader always finds a record during a replacement | yes: POSIX `rename` replaces atomically | **not documented** by Microsoft for `MoveFileExW`; a read may fail and be retried. In a test of 240 replacements with about 2 200 concurrent loads, none failed |
+| Content flushed before it becomes visible | requested (`fsync`; `F_FULLFSYNC` on Apple systems) | requested (`FlushFileBuffers`) |
+| Change of name flushed before `save` returns | requested (directory sync) | **not requested**: the standard library cannot sync a directory and does not pass `MOVEFILE_WRITE_THROUGH`. `DIRECTORY_SYNC` is `false` |
+| A read-only record | replaced (the directory's permissions decide) | **not replaced**: access denied, record kept |
+| A record another program holds open | replaced; that program keeps the old file | replaced if the handle shares delete (the standard library's default); otherwise the save fails and the record is kept |
+| Run and verified | **no** | yes, Windows 11 / NTFS |
+
+"Requested" means the operating system was asked. Nothing was tested under
+power loss or an operating-system crash, on any platform. A killed writer
+process was tested (40 kills, record always whole), which shows that a crash
+of the *program* does not damage the record; it says nothing about the
+kernel's buffers.
+
+### Loading and errors
+
+Loading never writes, repairs, moves or deletes.
+
+| Situation | Result | The file |
+|---|---|---|
+| No file | `Ok(None)` | — |
+| Empty, truncated, wrong kind of file, damaged header, wrong length, wrong digest, unsupported envelope version | `Corrupt { cause: Envelope(..) }` | untouched |
+| Intact, payload not UTF-8 | `Corrupt { cause: NotUtf8 }` | untouched |
+| Intact, document malformed / unsupported document version / invalid scenario or sample | `Corrupt { cause: Document(errors) }` | untouched |
+| The file cannot be read | `Io { operation: Read }` | untouched |
+| Saving an invalid value | `Invalid`; nothing written | previous record kept |
+| Create, write (including a full disk), sync, read back, rename fails | `Io { operation }` | previous record kept |
+| Read back differs | `VerifyMismatch` | previous record kept |
+| Directory sync fails | `Io { operation: SyncDirectory }` | **new record in place** |
+
+There is no fallback to a default, no automatic recovery and no backup
+generation. What to do about a corrupt record is the caller's decision
+(a later health system's, T10); saving replaces it.
+
+### Concurrency and temporaries
+
+Saves through one `Store` are serialised. More than one writer per directory
+is unsupported and not prevented: each file would still be a whole record,
+but which save wins is not defined. There is no lock file (a stale lock
+after a crash is a worse failure). Temporary files left by an interrupted
+save are never read as records; they are listed and removed only by explicit
+calls, because a live writer may own one.
+
+### Cost
+
+One synced save took about 3.6 ms on the development machine. How often to
+save the last-known record is the caller's choice.
 
 ## Platform delivery (planned, T11)
 

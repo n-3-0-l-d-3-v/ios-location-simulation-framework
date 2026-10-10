@@ -5,11 +5,14 @@ development and controlled research. It generates a coherent, deterministic,
 validated location stream (fixed point, bounded random walk, walking, driving,
 orbit, route replay) and delivers it through a replaceable platform adapter.
 
-**Status: simulation core and scenario documents only.** Tickets T00–T08 are
-done: the Rust core generates, validates and emits a consistent synthetic
-location stream, scenarios can be imported from and exported to strict,
-versioned JSON (`crates/locsim-scenario`, examples in `Examples/Scenarios/`),
-and both are tested on a desktop host. There is no iOS code yet — no C ABI, no Swift
+**Status: simulation core, scenario documents and persistence only.**
+Tickets T00–T09 are done: the Rust core generates, validates and emits a
+consistent synthetic location stream; scenarios can be imported from and
+exported to strict, versioned JSON (`crates/locsim-scenario`, examples in
+`Examples/Scenarios/`); a scenario and the last emitted sample can be stored
+in files with a digest and replaced atomically (`crates/locsim-store`). A
+stored simulation cannot be resumed, only started again. All of it is tested
+on one Windows desktop host. There is no iOS code yet — no C ABI, no Swift
 adapter, no app — and nothing has been run on an iPhone or the iOS Simulator.
 See [PROGRESS.md](PROGRESS.md), [Docs/COMPATIBILITY.md](Docs/COMPATIBILITY.md)
 and, for the full project context and how to resume work in a new session,
