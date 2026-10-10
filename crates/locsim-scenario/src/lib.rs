@@ -10,5 +10,6 @@
 
 mod error;
 mod json;
+mod schema;
 
 pub use error::ScenarioError;

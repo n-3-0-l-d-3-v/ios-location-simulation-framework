@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "name": "sample",
+  "origin": {
+    "latitude": 12.9352,
+    "longitude": 77.6245
+  },
+  "altitude_m": 920.5,
+  "mode": "route_replay",
+  "movement": {
+    "min_speed_mps": 0.25,
+    "max_speed_mps": 30.5,
+    "max_acceleration_mps2": 2.5,
+    "max_deceleration_mps2": 4.5,
+    "max_heading_rate_dps": 25.5,
+    "radius_m": 5000.5,
+    "step_distance_m": 1.5,
+    "heading_persistence": 0.5,
+    "pause_probability": 0.125,
+    "max_pause_s": 45.5,
+    "angular_velocity_dps": 3.5,
+    "direction": "counter_clockwise",
+    "start_phase_deg": 90.5,
+    "speed_change_interval_s": 60.5,
+    "max_displacement_per_sample_m": 40.5
+  },
+  "noise": {
+    "position_noise_m": 1.5,
+    "max_position_offset_m": 8.5,
+    "speed_noise_mps": 0.125,
+    "heading_noise_deg": 4.5,
+    "accuracy_noise_m": 0.75,
+    "drift_rate_mps": 0.0625,
+    "position_correlation_time_s": 6.5,
+    "max_offset_rate_mps": 1.25
+  },
+  "horizontal_accuracy_m": 6.5,
+  "vertical_accuracy_m": 9.5,
+  "update_interval_s": 0.5,
+  "seed": "12345",
+  "route": {
+    "name": "loop",
+    "points": [
+      {
+        "elapsed_ns": 0,
+        "coordinate": {
+          "latitude": 12.9352,
+          "longitude": 77.6245
+        },
+        "altitude_m": 920.5
+      },
+      {
+        "elapsed_ns": 2500000000,
+        "coordinate": {
+          "latitude": 12.93525,
+          "longitude": 77.62455
+        },
+        "altitude_m": 921.5
+      },
+      {
+        "elapsed_ns": 5000000001,
+        "coordinate": {
+          "latitude": 12.9353,
+          "longitude": 77.6246
+        },
+        "altitude_m": 922.5
+      }
+    ]
+  },
+  "playback": {
+    "speed": 1.5,
+    "looping": true,
+    "reverse": false
+  }
+}
