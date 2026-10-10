@@ -21,6 +21,11 @@ tooling is needed for the simulation core.
   any crate without a written justification in that crate's `Cargo.toml`
   (`locsim-scenario` carries one for `serde` and `serde_json`). Randomness
   comes only from `rng::Rng` (seeded).
+- Health: `cargo test -p locsim-health -- --nocapture` prints the measured
+  figures. `tests/support/mod.rs` has a provider that follows a script, a
+  real provider made to fail through `ModelFactory`, and two checks
+  (`assert_consistent`, `assert_reconciles`) that every test applies after
+  every step through `check`. New tests should do the same.
 - Persistence: `cargo test -p locsim-store -- --nocapture` prints the
   measured figures. `tests/crash.rs` starts the test binary as a child
   process and kills it; `tests/platform.rs` has a Windows module and a Unix

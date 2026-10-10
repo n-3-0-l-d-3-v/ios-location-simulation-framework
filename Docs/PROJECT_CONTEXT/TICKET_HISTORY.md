@@ -1,4 +1,4 @@
-# Ticket history: T00–T09
+# Ticket history: T00–T10
 
 What each completed ticket was for, what it built, what it decided, how it
 was tested, what it left open, and which commits it consists of.
@@ -10,7 +10,7 @@ How to read the evidence:
 - **Test counts at the close of each ticket** are *reported*: taken from
   `PROGRESS.md` as written at the time, not re-run at those commits. Only the
   final count (273 at `1be8852`) was re-run when this file was written. The
-  T08 and T09 counts were observed in the session that did the work.
+  T08, T09 and T10 counts were observed in the session that did the work.
 - **Statistics** (pairs re-checked, closest approach to a limit, and so on)
   are *reported* from test output. They are printed by the tests themselves
   and can be reproduced with `cargo test -- --nocapture`.
@@ -306,6 +306,65 @@ the audit were corrected (commits `bb2a354`, `0b603cd`).
   (killed-writer and platform tests), then the documentation commit that
   closed the ticket.
 
+## T10 — Health system
+
+- **Purpose.** Know whether a simulation is working, notice when it is not,
+  try again within a bound, and say what happened.
+- **How it was run.** Investigation, proposal, a revision for seven contract
+  issues raised in review, an addendum for three more, one last correction
+  to a test design, then six stages each with its own gate.
+- **Decided by the project owner.** A new crate depending on the core only;
+  the supervisor implements `LocationProvider`; bounded retries without
+  reseeding or altering the scenario; persistence faults through a generic
+  report hook; no coordinates and no per-sample events.
+- **Changed by the review, before coding.** Health split into lifecycle,
+  emission and a derived word. A refused initial start leaves the supervisor
+  stopped. The cross-run timestamp claim narrowed to a session and backed by
+  an enforced check. Missed-tick windows defined exactly. Retry accounting
+  defined (attempts, not runs; when counted; what resets it). One source of
+  truth for totals and events; read-only access to the provider. Every
+  policy value and the time arithmetic specified. Classification reduced to
+  what the error type can support. Backoff made constant-cost. The
+  large-attempt test made to assume nothing about how a product rounds.
+- **Built.** `locsim-health`: `policy` (`HealthPolicy`, conversion,
+  `Backoff`), `event` (`Event`, `EventKind`, sinks), `report`
+  (`HealthReport`, `Emission`, `Cause`, `Totals`), `supervisor`
+  (`Supervisor`, `for_simulation`, `check`, `report_fault`, `clear_fault`,
+  `next_deadline`). No file of the other three crates changed.
+- **Key decisions.** D17. Contract C21. D12 and C4 annotated.
+- **Changed existing behaviour.** None.
+- **Found.** Recovery is futile for a failure that does not depend on
+  timing, and a test shows four identical failures. No pipeline failure has
+  ever occurred naturally in the suite; all are injected. The
+  stale-timestamp check never acts on the real provider (removing it fails
+  only scripted-provider tests). The first sample after a restart is stamped
+  by the schedule, not by the restart.
+- **Mistakes in the design, caught in review or while writing the
+  addendum.** "Stamped exactly at the restart time"; `Transition` as
+  permanent; an assertion that a multiplication adds exactly one unit in the
+  last place.
+- **Mistakes in the implementation or tests.** Two mutations were not
+  caught at first (2^63 ns accepted; an episode surviving a stop) and a test
+  was added for each. Two expectations in new tests were wrong and were
+  corrected by derivation. Call legality was implemented from the
+  supervisor's own lifecycle rather than through the core's transition
+  function as designed; a test now ties the two together (`fcda25c`).
+- **Tests at close (observed 2026-10-10).** 516 in the workspace: 273 core,
+  89 scenario, 69 store, 85 health. Reported: supervised stream bit-identical
+  to the bare one for eight examples (7 560 pairs re-checked); 40 000 steps
+  of random histories with a consistent report and recountable totals after
+  each; 1 897 coordinate values searched for in every event, none found; a
+  million backoff attempts in under a second; 36 mutation checks.
+- **Left open.** No timer: a stall is noticed only by a call. Nothing run
+  off Windows or from more than one thread. The stall threshold is checked
+  against the interval only for the simulation provider. The last-known
+  record carries no run number. No bridge from `StoreError`.
+- **Commits.** `65bb746` (policy, time, backoff, events), `8353b98`
+  (lifecycle, pass-through, report), `ecd2559` (bounded restart, probation,
+  timestamps), `8be2c0f` (watchdog, `for_simulation`), `4f74e12` (fault
+  reports, reconciliation, privacy), `fcda25c` (legality agrees with the
+  core table), then the documentation commit that closed the ticket.
+
 ## Recurring lessons
 
 - Strict comparisons plus independent arithmetic expose every rounding
@@ -322,6 +381,14 @@ the audit were corrected (commits `bb2a354`, `0b603cd`).
   notices. The killed-writer test of T09 did not notice a non-atomic rename.
 - A platform row says what was run. Code that has never been compiled for a
   platform is not "expected to work" there; it is untested.
+- A design is reviewed like code. T10's was revised twice before a line
+  was written, and each revision removed a claim that the code would not
+  have supported.
+- Say what a mechanism cannot do in the same place that says what it does:
+  a watchdog nothing calls, a recovery that repeats the failure.
+- When an implementation departs from the approved design, say so and tie
+  the two together with a test, rather than leave the difference to be
+  found.
 - An expected number in a test is derived, not copied from the first run.
   When a new test fails, first ask whether the expectation or the code is
   wrong, and say which it was.

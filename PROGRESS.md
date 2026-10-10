@@ -5,10 +5,10 @@ long-lived project context, the invariants to preserve and how to resume in a
 new session, start at [Docs/PROJECT_CONTEXT/README.md](Docs/PROJECT_CONTEXT/README.md).
 
 ## Current Ticket
-T10 — Health system (not started)
+T11 — Platform adapter (not started)
 
 ## Status
-T00–T09 complete and tested on Windows. No iOS code exists yet.
+T00–T10 complete and tested on Windows. No iOS code exists yet.
 Repository: https://github.com/n-3-0-l-d-3-v/ios-location-simulation-framework
 
 ## Completed
@@ -21,149 +21,145 @@ Repository: https://github.com/n-3-0-l-d-3-v/ios-location-simulation-framework
 - T06 Route engine (ECEF spline, rigorous admission, RouteModel).
 - T07 Consistency engine.
 - T08 Scenario system (`crates/locsim-scenario`: strict, versioned JSON).
-- T09 Persistence. Details of T00–T08 are in
-  `Docs/PROJECT_CONTEXT/TICKET_HISTORY.md`. T09 delivered:
-  - **Scope decided by the project owner:** (A) scenario persistence and
-    (B) a last-known-output record. (C) checkpoint/resume is deferred to a
-    separate ticket that nobody owns yet. "Configuration" and "preferences"
-    from the ticket text are not stored: no such type exists.
-  - `locsim-scenario` gained the text form of the second record:
-    `LastKnown`, `export_last_known` / `import_last_known` (record version
-    1, as strict as the scenario codec) and `scenario_fingerprint` (FNV-1a
-    64 of the exported text).
-  - New crate `crates/locsim-store`, standard library only:
-    - `Store::open(dir)`, `save_scenario` / `load_scenario`,
-      `save_last_known` / `load_last_known`, `stale_temporaries` /
-      `remove_stale_temporaries`.
-    - Files are an envelope: `locsim-store 1`, `payload-sha256`,
-      `payload-bytes`, an empty line, then the payload byte for byte. The
-      digest is verified before the payload is interpreted. SHA-256 is
-      implemented in the crate.
-    - Atomic replacement: temporary file in the same directory, write,
-      sync, read back and compare, rename, directory sync where possible.
-    - `StoreError`: not a directory; I/O with the failed operation;
-      invalid value (nothing written); corrupt (envelope / not UTF-8 /
-      document refused; file untouched); verify mismatch; temporary-name
-      collision. A missing file is `Ok(None)`.
-  - `locsim-core` is unchanged. No engine, gate or domain code was touched.
+- T09 Persistence (`crates/locsim-store`: scenario and last-known record,
+  digest, atomic replacement; no checkpoint/resume).
+- T10 Health system. Details of T00–T09 are in
+  `Docs/PROJECT_CONTEXT/TICKET_HISTORY.md`. T10 delivered a new crate,
+  `crates/locsim-health`, depending on `locsim-core` only:
+  - `Supervisor<P: LocationProvider>`, itself a `LocationProvider`. It
+    hands samples on unchanged, ends a run that fails, restarts within a
+    bound, watches for stalls and missed ticks, and accepts fault reports
+    from the caller. It never reads a clock and never sleeps.
+  - `HealthReport`: `lifecycle` (what the supervisor is doing), `emission`
+    (whether samples are arriving), `health` (Stopped, Healthy, Degraded,
+    Recovering, Failed; derived, never stored), every active `Cause`, the
+    run number, attempts used, retry time, last error, cumulative `Totals`.
+  - **Recovery is a new run**, not a resume: the scenario starts again from
+    its beginning, the first sample has no speed, the position jumps, the
+    run number increases. A failure that does not depend on timing recurs.
+  - `HealthPolicy` (eight required fields, no default): restart bound,
+    backoff, stable time, stall threshold, missed-tick window.
+  - A refused call (`OperationRejected`; nothing changes) is distinct from
+    a failed run (`RunFailed`). A refused initial start leaves it Stopped.
+  - Within a session, timestamps handed on strictly increase, across
+    restarts too; a stale one is withheld and ends the run.
+  - Structured `Event`s to a caller-supplied `EventSink`; no coordinate in
+    any event; no event per sample. Totals are updated from the events.
+  - `locsim-core`, `locsim-scenario` and `locsim-store`: no file changed.
 
 ## Current Work
 - None in flight.
 
 ## Tests
-Last full run (2026-10-10, Windows 11, rustc 1.98.1, commit `29c8342`):
-**431 passed, 0 failed.** `cargo fmt --check` clean;
+Last full run (2026-10-10, Windows 11, rustc 1.98.1, commit `fcda25c`):
+**516 passed, 0 failed.** `cargo fmt --check` clean;
 `cargo clippy --all-targets --all-features -- -D warnings` clean.
 
 | Crate | Suite | Tests |
 |---|---|---|
-| `locsim-core` | Unit (in `src/`) | 202 |
-| `locsim-core` | nine integration suites (unchanged since T07) | 71 |
-| `locsim-scenario` | Unit (in `src/`) | 56 |
-| `locsim-scenario` | `examples` | 11 |
-| `locsim-scenario` | `last_known` | 5 |
-| `locsim-scenario` | `malformed` | 15 |
-| `locsim-scenario` | `round_trip` | 2 |
-| `locsim-store` | Unit (in `src/`) | 38 |
-| `locsim-store` | `scenario_store` | 15 |
-| `locsim-store` | `last_known_store` | 10 |
-| `locsim-store` | `platform` | 4 on Windows (3 more under `cfg(unix)`, never run) |
-| `locsim-store` | `crash` | 2 |
+| `locsim-core` | Unit 202, nine integration suites 71 (unchanged since T07) | 273 |
+| `locsim-scenario` | Unit 56, `examples` 11, `last_known` 5, `malformed` 15, `round_trip` 2 | 89 |
+| `locsim-store` | Unit 38, `scenario_store` 15, `last_known_store` 10, `platform` 4, `crash` 2 | 69 |
+| `locsim-health` | Unit (policy, backoff, events) | 18 |
+| `locsim-health` | `lifecycle` | 15 |
+| `locsim-health` | `pass_through` | 2 |
+| `locsim-health` | `recovery` | 25 |
+| `locsim-health` | `watchdog` | 18 |
+| `locsim-health` | `accounting` | 7 |
 
-T09 figures, printed by the tests (`cargo test -p locsim-store -- --nocapture`):
-- Damage: 31 786 single-character changes to the eight example scenarios.
-  As bare documents 3 340 are accepted, 1 357 of them as a *different valid
-  scenario*. Inside the envelope: none. For the last-known record: 19 505
-  changes, 942 accepted bare, none stored.
-- Every truncation and every single bit flip of a stored file is detected.
-- Fault injection: a save made to fail at each of seven steps (create,
-  partial write as a full disk, sync, read back, read back differing, read
-  back short, rename) leaves the old record byte-identical and no temporary
-  file; with the temporary file made unremovable, the original error is
-  still reported with the leftover named.
-- Killed writer: 40 writer processes killed at random moments; the record
-  was whole and valid every time; 5–10 kills per run landed inside a save.
-- Concurrent reading on Windows: 240 saves from four threads, about 2 200
-  loads by a reader, every one a whole record, none missing, none refused.
-- One synced save costs about 3.6 ms on this machine.
-- 20 000 arbitrary last-known records round-trip bit-exactly.
-- Mutation checks, all caught and restored: null speed read as zero; record
-  import without the sample check; fingerprint ignoring a byte; read-back
-  difference ignored; write error ignored; sync error ignored; temporary
-  not removed; digest not compared; length not compared; missing file
-  reported as an error; unreadable file treated as missing; invalid
-  scenario written anyway.
+T10 figures, printed by the tests (`cargo test -p locsim-health -- --nocapture`):
+- Pass-through: all eight examples, punctual and jittered, supervised stream
+  bit-identical to the bare one; 7 560 pairs re-checked independently.
+- 250 random histories of 160 steps on a scripted provider: after each of
+  the 40 000 steps the report is consistent and every total equals a recount
+  from the events; 600 failed runs, 5 756 rejected calls, 78 withheld
+  samples; all five health states occur.
+- Privacy: 1 897 coordinate values searched for in the Display and Debug
+  text of every event and report of eight runs; none found.
+- Backoff: a million attempts with the smallest multiplier above 1 in under
+  a second, in range, non-decreasing, equal to the same recurrence written
+  out again.
+- The edge of the representable duration range walked double by double:
+  407 below, one exactly on 2^63 ns, 642 above.
+- Mutation checks: 36 deliberate breaks across the five stages, all caught
+  and restored. Two were missed at first and a test was added for each
+  (2^63 ns accepted; a failure episode surviving a stop).
 
-Findings during T09:
-- **Validation is not integrity.** A codec cannot tell `1.8` from `1.3`.
-  About 4 % of single-character changes to a bare scenario document give a
-  different valid scenario. This is why stored files carry a digest.
-- **The provider is not a function of scenario and time.** It is a
-  deterministic function of the scenario and the whole sequence of calls.
-  Two document statements said more than that and were corrected (D4 and
-  the provider section of `Docs/ARCHITECTURE.md`).
-- **A read-only record cannot be replaced on Windows** (access denied at
-  the rename), unlike Unix. Found by a test whose expectation was wrong.
-- **The killed-writer test is weak on its own.** With the rename replaced
-  by a non-atomic copy, it still passed (no kill landed in the short copy);
-  the concurrent-reader test caught the defect. The step-by-step guarantee
-  rests on fault injection.
-- Test defects of mine, corrected against derivation: a payload length
-  miscounted by one; a faulty file system also used for the check that was
-  meant to be independent of it.
+Findings during T10:
+- **Recovery is often futile, and the documents say so.** A run is
+  deterministic; with the same polling, a restart fails at the same sample.
+  A test shows four runs failing identically. Retries help only when the
+  failure came from timing.
+- **No pipeline failure has ever occurred naturally** in the suite. Every
+  failure in the T10 tests is injected (a failing movement model through the
+  public `ModelFactory`, or a scripted provider).
+- **The stale-timestamp check never acts on the real provider.** With the
+  check removed, only the scripted-provider tests fail. For
+  `SimulationProvider` the order follows from the scheduler.
+- The first sample after a restart is stamped by the schedule, at or after
+  the restart, not necessarily at it (a late first poll skips ticks). An
+  earlier draft of the design said "exactly at"; corrected before coding.
+- Wrong expectations of mine in new tests, corrected by derivation: a
+  scripted provider emitting at an earlier time (the supervisor was right to
+  withhold it); one completed recovery expected where the design gives two.
+- The implementation decides call legality from its own lifecycle rather
+  than by calling the core's transition function, as the design had said. A
+  test now checks the two agree in every state.
 
 ## Known Issues / Limitations
-- **Persistence, not verified:**
-  - Power loss or an operating-system crash. Nothing was tested; the
-    statements about durability describe what is requested of the OS.
-  - Any Unix-like system: the replacement path, directory sync and the
-    three `cfg(unix)` tests have never been compiled or run.
-  - Any file system but NTFS on one machine; network file systems.
-- **Persistence, by design:**
-  - On Windows the change of name is not confirmed durable (`DIRECTORY_SYNC`
-    is `false`): after a successful save, a power loss may leave the old
-    record. Closing this needs `MOVEFILE_WRITE_THROUGH`, which needs
-    `unsafe` FFI or a dependency; not done.
-  - Microsoft does not document the replacement as atomic. A reader may get
-    an I/O error during a replacement; none was observed.
-  - One writer per directory. No lock; two writing processes are unsupported.
-  - No backup generation. A successful save replaces the record.
-  - The digest detects accidental damage only. It is not authentication.
-  - The last-known record cannot resume a run. Checkpoint/resume is not
-    implemented and no ticket owns it.
-  - A record held open by another Windows program without delete sharing,
-    or marked read-only, makes saves fail (cleanly) until that changes.
-  - Stored files are not bare JSON; a hand-edited payload fails the digest.
-    To change a stored scenario: import the document, then save it.
-  - `scenario_fingerprint` changes if the exported text of a scenario ever
-    changes (a new schema version), so records do not match across that.
+- **Health supervision:**
+  - A stall is noticed only when something calls `check` or `poll`. There is
+    no timer, thread or driver. If nothing calls the supervisor, it reports
+    what it last saw.
+  - Recovery restarts the scenario from its beginning. There is a position
+    jump and no continuity; consumers must watch the run number.
+  - A deterministic failure is retried up to the bound and fails each time.
+  - The stall threshold is checked against the update interval only by
+    `Supervisor::for_simulation`. With `Supervisor::new` a threshold shorter
+    than the interval reports a provider that is on time as stalled.
+  - Across an explicit `stop` and `start`, timestamps may go back (the
+    core's own behaviour); order is guaranteed within a session only.
+  - A custom provider's errors are classified by the `ProviderError`
+    variant it chooses to return.
+  - `stop` takes no time argument in the trait; its events carry the latest
+    time the supervisor had seen.
+  - `status()` of the supervisor counts samples handed on; after a withheld
+    sample the wrapped provider's own count is one higher.
+  - The last-known record (T09) carries no run number.
+  - Persistence faults reach health only if the caller reports them; there
+    is no bridge from `StoreError`.
+  - Not verified: use from several threads; any build but Windows.
+- **Persistence (T09):** nothing run on a Unix-like system; nothing tested
+  under power loss; on Windows the rename is not confirmed durable; one
+  writer per directory; no checkpoint/resume (unowned).
 - **History:** commit `019ad0f` (T08 examples) carries the message of
   `7547565` by mistake. History is left as it is.
 - Scenario documents (T08): no defaults; seeds are strings; import does not
-  admit a route; validation errors have a path but no line or column; only
-  schema version 1 exists, so no real migration has ever run.
-- `rust-version = "1.75"` is unverified for all three crates.
-- Carried over from T07 and earlier: speed is an interval mean; the first
-  sample of a run has no speed or course; the noise engine computes a speed
-  and course nothing uses; a provider in `Error` stays there (T10); raw GPS
-  logs are usually not admissible as routes; no real-time driver; nothing
-  has run on iOS.
+  admit a route; only schema version 1 exists.
+- `rust-version = "1.75"` is unverified for all four crates.
+- Carried over: speed is an interval mean; the first sample of a run has no
+  speed or course; the noise engine computes a speed and course nothing
+  uses; raw GPS logs are usually not admissible as routes; no real-time
+  driver; nothing has run on iOS.
 
 ## Compatibility
-- All three crates: Verified on Windows 11 x86_64 / rustc 1.98.1 only.
-- `locsim-store` on Unix-like systems: Untested, including code that only
-  compiles there.
+- All four crates: Verified on Windows 11 x86_64 / rustc 1.98.1 only.
+- `locsim-health` is logic only (no files, clock, threads or platform
+  calls), but it has still been built and run on Windows alone.
 - iOS Simulator, physical devices, jailbroken devices: Untested (no adapter yet).
 
 ## Next
-- T10 Health system: health state, metrics, watchdog, bounded recovery
-  (for example three retries with backoff, then FAILED), structured logging
-  with levels.
-- What T10 can build on: `ProviderStatus` counters; the `Error` and
-  `Recovering` states that exist but nothing drives; `StoreError` as a
-  structured failure source; the fact, established in T09, that a run
-  cannot be resumed, so "recovery" can only mean a new run.
-- Decisions T10 needs: see `Docs/PROJECT_CONTEXT/CURRENT_STATE.md`.
+- T11 Platform adapter: the authorised iOS delivery/test adapter; document
+  platform limitations.
+- **T11 cannot be completed on the current machine.** It needs a Mac with
+  Xcode for anything Swift and for any run on the Simulator or a device.
+  What can be done on Windows is limited to a C ABI crate tested from Rust
+  and, possibly, a compile check for the iOS target. See
+  `Docs/PROJECT_CONTEXT/CURRENT_STATE.md`.
+- What T11 can build on: `Supervisor` is a `LocationProvider`, so the
+  adapter wraps one object; `next_deadline()` on the provider and the
+  supervisor say when to call next; `HealthReport.run` marks
+  discontinuities; `None` speed and course must become Core Location's `-1`.
 - Gotchas:
   - Position and timestamp are authoritative; never emit speed/course from a
     model.
@@ -172,12 +168,15 @@ Findings during T09:
   - Gate every commit on its test result; unstage on failure.
   - Write the commit message file, read its first line back, and only then
     commit, as separate steps (`019ad0f`).
-  - A file written by a shell heredoc containing backslashes or a lone
-    apostrophe may not be what was typed on this machine; write such files
-    with a tool, and derive expected numbers by hand.
-  - Tests that write thousands of files are slow here (about 6 ms per
-    write); keep high-volume corruption tests in memory.
+  - A shell heredoc containing a lone apostrophe or backslashes may not
+    write what was typed on this machine; write such files with a tool.
+  - `cargo test -p <crate>` stops at the first failing test binary; when
+    checking that a particular suite catches a mutation, run that suite.
+  - Derive expected numbers by hand. When a new test fails, decide whether
+    the expectation or the code is wrong, and say which.
 
 ## Working agreement
 - One ticket at a time; the specification is the contract.
+- For a ticket with design decisions: investigate, propose, get approval,
+  then implement in agreed stages, each with its own gate.
 - One commit per logical change, each tested and pushed immediately.

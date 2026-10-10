@@ -21,8 +21,8 @@ Each decision says where its rationale comes from:
 Stated in `crates/locsim-core/src/lib.rs`. A module may use modules to its
 left. `consistency` uses only `domain` and `geographic`; `validation` uses
 `consistency`; `provider` wires everything. `locsim-scenario` is a second
-crate on top of the core (D14) and `locsim-store` a third on top of both
-(D16). Platform code, when it exists,
+crate on top of the core (D14), `locsim-store` a third on top of both
+(D16), and `locsim-health` a fourth on top of the core alone (D17). Platform code, when it exists,
 sits outside this crate and contains conversion and lifecycle only.
 
 ## D1. The core is a dependency-free Rust crate (recorded, session)
@@ -239,8 +239,9 @@ sits outside this crate and contains conversion and lifecycle only.
   and rejects illegal moves. Every active state can reach `Stopping`.
   A configuration that fails validation leaves the provider `Idle`. A failed
   sample moves it to `Error` and it stays there.
-- **Not built.** Automatic recovery (`Recovering`), health states, watchdog:
-  T10. The enum variants exist; nothing drives them yet.
+- **Since T10.** The provider still never leaves `Error` by itself. The
+  supervisor in `locsim-health` reports `Recovering` while a restart is
+  pending and uses `HealthState`; see D17.
 
 ## D13. Future platform adapter (planned; uncertain where noted)
 
@@ -374,12 +375,69 @@ technical details (integrity, replacement) were resolved before coding.
 - **Loading never writes.** Missing is `None`; corrupt is an error; nothing
   becomes a default.
 
+## D17. Health is a supervisor outside the core; recovery is a new run (recorded, T10)
+
+Decided by the project owner on 2026-10-10 after a proposal, a revision and
+an addendum, all before any code.
+
+- **A new crate, depending on the core only.** `locsim-health` wraps a
+  `LocationProvider`. **Why.** The engines cannot be altered by something
+  that cannot reach inside them; the pattern is that of D14 and D16; and it
+  works for any future provider. **Rejected:** a module in the core (the
+  core has been unchanged since T07, and health needs nothing private).
+- **The supervisor is a `LocationProvider`.** It drops in wherever a
+  provider goes. A failing `poll` returns the provider's error once, then
+  `Ok(None)`; the reason is in the report. **Rejected:** a separate result
+  type for `poll` (every consumer would need two code paths).
+- **Recovery is a new run, bounded, with nothing altered.** T09 established
+  that a run cannot be resumed (D16; D4 as corrected). So the only possible
+  recovery is to start the scenario again. Deterministic failures are
+  retried up to the bound and fail each time. **Rejected:** reseeding or
+  adjusting the scenario so that a retry differs (rule 11: no component
+  silently modifies another's configuration); a detector for "the same
+  failure at the same tick" (more machinery than the bound it would save).
+- **Three fields, not one.** Lifecycle, observed emission and a derived
+  health word. The first draft let "degraded" cover a silent provider
+  without saying it was silent, and let "stopped" and "failed" blur; the
+  review asked for the distinction.
+- **A refused start is not a failure.** It leaves the supervisor stopped,
+  mirroring contract C4. An earlier draft made it `Failed`.
+- **Only one error is permanent.** `ScheduleError::Overflow`, because a
+  later start provably cannot cure it. An earlier draft also listed
+  `Transition`; the real provider never returns it from `poll`, and there
+  was no evidence either way for another provider, so it is retried.
+- **Timestamps are enforced, not assumed.** The supervisor is generic, so
+  the scheduler argument that covers `SimulationProvider` is backed by a
+  check that covers everything. An earlier draft claimed the first sample
+  after a restart carries the restart time; it carries its tick's time,
+  which is later if the first poll is late.
+- **Backoff as a recurrence with constant cost.** One multiplication per
+  attempt, held per episode. **Rejected:** a power function (not guaranteed
+  identical across platforms); a loop from the first attempt (cost grows
+  with the attempt number and, with a multiplier just above 1, without
+  practical bound); jitter (needs randomness and serves contention between
+  many clients, of which there are none).
+- **Watchdog by call, not by timer.** Consistent with D4. The cost is
+  stated everywhere it matters: nothing is noticed unless something calls.
+- **Windows of tick slots that do not overlap**, tripping at once and
+  clearing only at a clean close: simple to state exactly and to test at its
+  boundaries. **Rejected:** a sliding window (needs a history buffer, and
+  its boundary cases are harder to state).
+- **Other components report; health does not look.** A generic fault hook.
+  **Rejected:** a dependency on `locsim-store` (wrong direction), or a typed
+  list of components (the crate would have to know them).
+- **Events are structured, to a sink, with no positions.** No logging
+  dependency, no destination chosen here. Totals are updated from events in
+  one function so that the two cannot drift.
+- **Call legality from the supervisor's own lifecycle.** The design said it
+  would call the core's transition function; the implementation does not. A
+  test checks that the two agree in every state.
+
 ## Decisions a future ticket will have to make
 
-- T10: recovery can only mean a new run (D16); whether health lives in the
-  core or beside it; how backoff is expressed when nothing sleeps (D4); the
-  log sink and what may be logged (no coordinates above debug level).
-- Unowned: checkpoint/resume (D16); `MOVEFILE_WRITE_THROUGH` on Windows.
-- T10: whether recovery re-creates the run or resumes it, and what the
-  deriver and validator state should be afterwards.
-- T11: everything in D13.
+- T11: everything in D13; whether to split the ticket so that the Rust side
+  can be done without a Mac; where the one exception to `forbid(unsafe_code)`
+  lives; who calls `poll` and `check` and with which clock; how the run
+  number reaches the platform as a discontinuity.
+- Unowned: checkpoint/resume (D16); `MOVEFILE_WRITE_THROUGH` on Windows; a
+  timer or driver; a bridge from `StoreError` to fault reports.

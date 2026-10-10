@@ -7,7 +7,8 @@ assuming one. The only line you may want to edit is the optional
 "Ticket override" at the end.
 
 As of 2026-10-10 the ticket a fresh session is expected to arrive at is
-**T10 — Health system**.
+**T11 — Platform adapter**. That ticket needs a Mac with Xcode for anything
+beyond a Rust-side C ABI; see `CURRENT_STATE.md`, "Before starting T11".
 
 ---
 

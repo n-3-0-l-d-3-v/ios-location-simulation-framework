@@ -6,7 +6,7 @@ long-lived context: what the project is, why it is built the way it is, what
 must not be broken, what has been done, and how to resume.
 
 It was written on 2026-10-09 at commit `1be8852`, after ticket T07, and
-updated on 2026-10-10 at commit `29c8342`, after ticket T09 and before T10.
+updated on 2026-10-10 at commit `fcda25c`, after ticket T10 and before T11.
 **Everything here can go stale. The repository is the truth; these
 documents are a map of it.**
 
@@ -18,7 +18,7 @@ documents are a map of it.**
 | 2 | [PROJECT_BRIEF.md](PROJECT_BRIEF.md) | Purpose, scope, non-goals, safety boundaries, the full ticket plan | Always |
 | 3 | [ENGINEERING_CONTRACTS.md](ENGINEERING_CONTRACTS.md) | The invariants every ticket must preserve, with the source and tests that enforce them | Always, before changing code |
 | 4 | [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md) | Why each layer is the way it is; rejected alternatives | Before any design decision |
-| 5 | [TICKET_HISTORY.md](TICKET_HISTORY.md) | T00–T09: what each did, its commits, its mistakes | When you need to know how something got here |
+| 5 | [TICKET_HISTORY.md](TICKET_HISTORY.md) | T00–T10: what each did, its commits, its mistakes | When you need to know how something got here |
 | 6 | [NEXT_CHAT_PROMPT.md](NEXT_CHAT_PROMPT.md) | The copy-paste prompt that starts a fresh session | To start a session |
 
 Outside this directory:
@@ -68,15 +68,16 @@ been run on an iPhone, an iOS Simulator, or any Apple platform.**
 
 ## Current state in five lines
 
-- Tickets T00–T09 are complete: a dependency-free Rust simulation core
+- Tickets T00–T10 are complete: a dependency-free Rust simulation core
   (`crates/locsim-core`); strict, versioned JSON for scenarios and for a
-  last-known record (`crates/locsim-scenario`); and file storage of both
-  with a digest and atomic replacement (`crates/locsim-store`).
-- Verified at `29c8342` on 2026-10-10 (Windows 11, rustc 1.98.1): 431 tests
+  last-known record (`crates/locsim-scenario`); file storage of both with a
+  digest and atomic replacement (`crates/locsim-store`); and a supervisor
+  with a watchdog, bounded restart and events (`crates/locsim-health`).
+- Verified at `fcda25c` on 2026-10-10 (Windows 11, rustc 1.98.1): 516 tests
   pass, `cargo fmt --check` and `cargo clippy -D warnings` are clean.
 - There is no iOS code of any kind: no C ABI, no Swift, no app. Nothing has
-  run on any Unix-like system, including the Unix-only code of the store.
-- A stored simulation cannot be resumed (no checkpoint; unowned). There is
-  no health monitoring, logging or real-time driver yet.
-- **Next ticket: T10 — Health system (health state, watchdog, bounded
-  recovery, structured logging). Not started.**
+  run on any system but one Windows machine.
+- A stored or failed simulation cannot be resumed, only started again.
+  There is no timer or real-time driver: everything is polled.
+- **Next ticket: T11 — Platform adapter. Not started, and not completable
+  on the Windows machine used so far: it needs a Mac with Xcode.**

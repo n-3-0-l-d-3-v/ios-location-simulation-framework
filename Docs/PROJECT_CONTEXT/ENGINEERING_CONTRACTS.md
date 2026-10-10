@@ -5,11 +5,11 @@ and which tests would fail if it broke. Paths are relative to
 `crates/locsim-core/`. Test references are `file::test_function`.
 
 Paths in C19 are relative to `crates/locsim-scenario/`, in C20 to
-`crates/locsim-store/`.
+`crates/locsim-store/`, in C21 to `crates/locsim-health/`.
 
 References in C1–C18 were checked to exist at commit `1be8852` (2026-10-09);
-T08 and T09 changed no file of `locsim-core`. References in C19 and C20 were
-checked at `29c8342` (2026-10-10). If one no longer resolves, the code moved: find the
+T08, T09 and T10 changed no file of `locsim-core`. References in C19 and C20
+were checked at `29c8342`, those in C21 at `fcda25c` (2026-10-10). If one no longer resolves, the code moved: find the
 new home before concluding the contract is gone.
 
 **If a change makes one of these tests fail, the default assumption is that
@@ -65,7 +65,8 @@ State changes only through `SimulationState::transition`. An invalid
 configuration is rejected at `start` and leaves the provider `Idle`. A sample
 that cannot be produced or fails validation is not emitted; the provider
 enters `Error` and emits nothing further. `stop` works from every active
-state.
+state. The provider never leaves `Error` by itself; restarting is done from
+outside it (C21) and is a new run.
 
 - Enforced in: `src/domain/state.rs`, `src/provider/simulation.rs`.
 - Tests: `src/domain/state.rs::transition_table_is_exactly_as_specified`,
@@ -407,3 +408,91 @@ files, and it has no third-party dependency.
   record inside the store; describe the record as a checkpoint; describe
   the digest as protection against tampering; upgrade a platform row in the
   documentation without a run on that platform.
+
+## C21. Health: derived, bounded, honest about what a restart is
+
+Added by T10. The crate is `locsim-health`; it depends on `locsim-core`
+only, and no file of the other crates was changed for it. Paths below are
+relative to `crates/locsim-health/`.
+
+- **A supervisor changes no sample.** With nothing to do, the supervised
+  stream is the bare stream bit for bit. It decides only whether a sample is
+  handed on and what follows a failure. The gate is untouched and is never
+  bypassed, relaxed or re-run by the supervisor.
+- **Health is derived, never stored, and cannot contradict the lifecycle.**
+  `Stopped` if and only if no run exists and none is scheduled; `Failed` if
+  and only if the run failed and nothing will be tried; `Recovering` if and
+  only if a retry time exists; `Healthy` only with no active cause. Whether
+  samples are arriving is a separate field: a stalled provider is reported
+  as running *and* as not emitting.
+- **A refused call is not a failed run.** A lifecycle call that returns an
+  error changes nothing and is reported as `OperationRejected`. A run fails
+  only when `poll` errs, a sample is withheld, or the provider's state
+  disagrees with the lifecycle. A refused initial start leaves the
+  supervisor `Stopped`.
+- **Recovery is a new run and is described as one.** It starts the scenario
+  from its beginning. No document, name or message may suggest that a run
+  is resumed, continued or restored, or that the last-known record plays any
+  part. The run number increases and marks a discontinuity. Nothing is
+  reseeded or altered to make a retry differ.
+- **Recovery is bounded.** `max_recovery_attempts` counts restart attempts
+  per failure episode; an attempt is counted when made; a restart that
+  cannot start a run uses its attempt; the count returns to zero only when a
+  restarted run has emitted for `stable_after_s`, or at `stop`. After the
+  bound: `Failed`, until `stop` and `start`.
+- **Errors are classified by variant, on evidence.** Only
+  `ScheduleError::Overflow` is final at once. Nothing is read from an
+  error's text. Retrying is not a claim of recoverability.
+- **Timestamps handed on strictly increase within a session**, across
+  restarts. A stale one is withheld and ends the run. For the simulation
+  provider this follows from the scheduler; the check is what guarantees it
+  for any provider.
+- **Time is passed in.** No clock, sleep, thread or randomness. Seconds
+  become nanoseconds once, by the core's rounding rule; a duration that does
+  not fit is refused at validation. The backoff costs one multiplication per
+  attempt whatever the attempt number. No power function, no loop over
+  attempts, no arithmetic that can overflow silently.
+- **One place for events and totals.** Every event passes through one
+  function, which updates the totals from it. Every total can be recounted
+  from the event stream.
+- **No position in any event**, at any level, and no event per sample.
+- **Other components are reported, not known.** Their faults enter through
+  `report_fault`. A fault degrades a run and does nothing else. The crate
+  must not depend on `locsim-store` or `locsim-scenario` (tests excepted).
+- Enforced in: `src/supervisor.rs` (`record`, `fail_run`, `after_failure`,
+  `attempt_restart`, `note_slots`, `watch_for_stall`, `derive_health`),
+  `src/policy.rs` (`HealthPolicy::limits`, `seconds_to_nanos`, `Backoff`),
+  `src/event.rs`, `src/report.rs`.
+- Tests: `tests/pass_through.rs::a_supervised_stream_is_the_bare_stream_bit_for_bit`,
+  `tests/lifecycle.rs::a_call_the_lifecycle_does_not_allow_is_refused_and_changes_nothing`,
+  `tests/lifecycle.rs::a_refused_start_leaves_the_supervisor_stopped_not_failed`,
+  `tests/lifecycle.rs::a_sample_with_a_stale_timestamp_is_withheld_and_ends_the_run`,
+  `tests/lifecycle.rs::ticks_skipped_by_the_failing_poll_are_counted_in_the_run_and_the_totals`,
+  `tests/recovery.rs::the_bound_counts_restart_attempts_not_runs`,
+  `tests/recovery.rs::an_attempt_is_made_at_its_time_and_not_a_nanosecond_before`,
+  `tests/recovery.rs::a_restart_that_cannot_start_uses_its_attempt_and_the_next_is_scheduled`,
+  `tests/recovery.rs::an_episode_ends_when_the_restarted_run_has_emitted_for_the_stable_time`,
+  `tests/recovery.rs::every_error_is_retried_except_unrepresentable_tick_times`,
+  `tests/recovery.rs::a_restarted_run_is_a_fresh_run_of_the_scenario_not_a_continuation`,
+  `tests/recovery.rs::a_failure_that_does_not_depend_on_timing_happens_again_in_every_restart`,
+  `tests/recovery.rs::the_first_sample_after_a_restart_is_stamped_by_the_schedule_not_by_the_restart`,
+  `tests/recovery.rs::random_sequences_of_failures_delays_and_pauses_keep_timestamps_increasing`,
+  `tests/recovery.rs::a_provider_that_restarts_with_an_old_timestamp_is_caught_by_the_check`,
+  `tests/recovery.rs::which_calls_are_allowed_agrees_with_the_core_transition_table`,
+  `tests/watchdog.rs::a_run_is_stalled_one_nanosecond_after_the_threshold_and_not_at_it`,
+  `tests/watchdog.rs::nothing_is_expected_of_a_paused_run`,
+  `tests/watchdog.rs::exactly_the_limit_is_not_falling_behind_and_one_more_is`,
+  `tests/watchdog.rs::it_ends_only_when_a_whole_window_closes_within_the_limit`,
+  `tests/accounting.rs::a_reported_fault_degrades_a_run_and_does_nothing_else`,
+  `tests/accounting.rs::reports_stay_consistent_and_totals_recountable_through_random_histories`,
+  `tests/accounting.rs::no_event_reveals_a_position`,
+  `src/policy.rs::a_million_attempts_with_a_multiplier_just_above_one_stay_cheap_and_sound`,
+  `src/policy.rs::a_duration_must_fit_in_nanoseconds`.
+- In every test, after every step, `tests/support/mod.rs::assert_consistent`
+  and `assert_reconciles` are applied through `check`. A new test that
+  skips them is not testing what this contract says.
+- Do not: store health; give mutable access to the wrapped provider; add a
+  clock, sleep or thread to the supervisor; make a fault stop or restart a
+  run; put a coordinate in an event; call a restart a resume; retry without
+  a bound; treat an error as permanent or recoverable because of its text;
+  weaken the gate so that a restarted run passes.

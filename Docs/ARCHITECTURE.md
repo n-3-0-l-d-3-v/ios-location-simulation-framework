@@ -19,7 +19,7 @@ the index of all context documents is
     Geographic Engine              WGS84 geodesics, ENU            [implemented]
     Location Abstraction           LocationProvider trait          [implemented]
     Platform Adapter               C ABI + Swift → CLLocation
-    Health / Recovery              metrics, watchdog, bounded retries
+    Health / Recovery              supervisor: watchdog, bounded restart, events [implemented, separate crate]
     Persistence / Storage          scenario + last-known record, digest, atomic replace [implemented, separate crate]
 
 Cross-cutting: `domain` (canonical types) [implemented], `rng` (seeded PRNG)
@@ -29,8 +29,8 @@ implemented).
 
 Dependency rule: a layer may import only layers below it plus `domain`/`rng`.
 The platform adapter contains conversion and lifecycle code only.
-`locsim-scenario` depends on the core; `locsim-store` depends on both; the
-core depends on nothing.
+`locsim-scenario` depends on the core; `locsim-store` depends on both;
+`locsim-health` depends on the core alone; the core depends on nothing.
 
 ## Language and packaging
 
@@ -38,6 +38,7 @@ core depends on nothing.
 |---|---|---|
 | Simulation core | Rust crate `locsim-core`, zero dependencies, `#![forbid(unsafe_code)]` | Testable on any desktop OS without an iPhone; bit-reproducible seeded output; cross-compiles to iOS |
 | Scenario documents | Rust crate `locsim-scenario`; depends on `locsim-core`, `serde` (no derive) and `serde_json` (`float_roundtrip`); `#![forbid(unsafe_code)]` | Keeps the core dependency-free while using a widely tested JSON reader and writer; see "Scenario documents" below |
+| Health | Rust crate `locsim-health`; depends on `locsim-core` only (and on `locsim-scenario` in its tests); `#![forbid(unsafe_code)]` | Supervision cannot alter an engine by construction; logic only, no files, clock or threads; see "Health supervision" below |
 | Persistence | Rust crate `locsim-store`; depends on `locsim-core` and `locsim-scenario`, nothing else; `#![forbid(unsafe_code)]` | The only crate that touches files; SHA-256 and atomic replacement written with the standard library; see "Persistence" below |
 | Platform boundary | C ABI crate (`locsim-ffi`, T11) | The only stable interface Swift/Obj-C can consume |
 | iOS adapter + demo app | Swift (T11/T12) | Core Location and UI are Apple-only APIs |
@@ -527,8 +528,9 @@ Design decisions worth knowing:
 - Failure behaviour: an invalid scenario is rejected at `start` and the
   provider stays `Idle`. If a sample cannot be produced or fails validation,
   nothing is emitted, `failed_count` increments and the state becomes `Error`
-  (no further samples; `stop` still works). Bounded automatic recovery is the
-  health subsystem's job (T10).
+  (no further samples; `stop` still works). The provider never leaves
+  `Error` by itself. Bounded restarting is done from outside, by the
+  supervisor in `locsim-health`, and is a new run, not a continuation.
 - `ModelFactory` lets another movement engine be plugged in without modifying
   the provider.
 
@@ -796,6 +798,160 @@ calls, because a live writer may own one.
 One synced save took about 3.6 ms on the development machine. How often to
 save the last-known record is the caller's choice.
 
+## Health supervision (`locsim-health`, T10)
+
+A crate on top of the core, and only the core. `Supervisor<P>` wraps any
+`LocationProvider` and is one itself, so whatever drives a provider drives a
+supervised provider. It hands samples on unchanged. It does not read a
+clock, sleep, start a thread, open a file or know any other component.
+
+### What it reports
+
+Three questions, three fields of `HealthReport`:
+
+| Field | Question | How it is obtained |
+|---|---|---|
+| `lifecycle` (`SimulationState`) | What is the supervisor doing? | Its own state machine |
+| `emission` | Are samples actually arriving? | Observation at the latest call |
+| `health` (`HealthState`) | One word | Derived from the two and from `causes`, when asked; never stored |
+
+| `health` | Exactly when | `lifecycle` |
+|---|---|---|
+| `Stopped` | No run exists and none is scheduled: never started, stopped, or a start was refused | `Idle` |
+| `Healthy` | A run exists, has not failed, no cause is active | `Running`, `Paused` |
+| `Degraded` | A run exists, has not failed, at least one cause is active | `Running`, `Paused` |
+| `Recovering` | The run failed; a restart is scheduled (`retry_at`) | `Recovering` |
+| `Failed` | The run failed; nothing will be tried until `stop` and `start` | `Error` |
+
+Causes, all listed at once: `Stalled`, `FallingBehind`, `Probation`,
+`ExternalFault(component)`. A stalled provider is `Degraded` with
+`emission == Stalled { silent_for_ns }`: the lifecycle says running, the
+observation says nothing is arriving, and the report says both.
+
+### Rejected operations and failed runs
+
+- A **rejected operation** is a lifecycle call that returns an error.
+  Nothing changes; the error is returned as it is; one `OperationRejected`
+  event. A call the supervisor's own lifecycle does not allow is refused
+  with `Transition` without reaching the provider. A refused initial start
+  leaves the supervisor `Stopped`, as it leaves the core provider `Idle`.
+- A **failed run** has exactly three sources: `poll` returned an error; a
+  sample was withheld; the provider's state is not the one the lifecycle
+  implies. `RunFailed` and `RunEnded` are recorded.
+
+### Recovery is a new run
+
+After a failure, if the policy allows, the supervisor waits out a backoff
+and starts a new run of the same scenario. Nothing is resumed (see
+`provider`, "State", and "Persistence"):
+
+- the run begins where every run of the scenario begins, with fresh random
+  streams, noise and validation history; its first sample has no speed;
+- there is a jump in position between the runs, and no continuity is
+  claimed or checked across it; each run passes the gate on its own;
+- `HealthReport.run` increases, and a consumer must treat that as a
+  discontinuity;
+- nothing is reseeded or altered, so a failure that does not depend on
+  timing recurs in every restart, and the bound is what stops it.
+
+Kept across runs: the totals, the last error, the timestamp of the last
+sample handed on. Nothing else.
+
+| | Rule |
+|---|---|
+| `max_recovery_attempts` | Restart attempts per failure episode, not runs. `0`: a failure is final |
+| Episode | From a failure until a restarted run has emitted for `stable_after_s`, or the supervisor gives up, or `stop` |
+| When an attempt counts | When it is made, not when it is scheduled |
+| A restart that cannot start a run | Uses its attempt; the next is scheduled from that time |
+| A failure during probation | Continues the episode |
+| Before a restart | The provider is stopped only if it is not idle |
+| Errors | Told apart by variant. Final at once: `ScheduleError::Overflow` only. All others are retried within the bound, which is not a claim that they are recoverable |
+
+Backoff: the delay for the first attempt is `backoff_initial_s`; after each
+attempt it is multiplied by `backoff_multiplier` and limited to
+`backoff_max_s`. One multiplication and one comparison per attempt, IEEE
+multiplication only, never decreasing, never above the maximum. The delay
+runs from the failure before it. A retry time that cannot be represented
+ends in `Failed`.
+
+### Time
+
+Durations are given in seconds and converted once, when the policy is
+accepted, by `(seconds × 1e9).round()` — the core's rule for the update
+interval. A duration that does not fit an `i64` of nanoseconds is refused
+then. Everything later is integer arithmetic, with checked addition and
+128-bit differences. Nothing happens except inside a call, at the time that
+call was given: a retry is made by the first `poll` or `check` at or after
+its time (`poll` then polls the new run in the same call; `check` does not).
+
+### Timestamps
+
+Within a session (from `start` to `stop`) the timestamps of samples handed
+on strictly increase, across restarts too. A sample whose timestamp is not
+later than the previous one is withheld, ends the run, and is reported as
+`ValidationError::NonMonotonicTimestamp`.
+
+For `SimulationProvider` this check never acts (with it removed, only the
+scripted-provider tests fail). A run's samples are stamped with the ideal
+time of their tick, at or after the run's start; a restarted run starts at
+the time of the restarting call, which is not before the failing poll; the
+last sample handed on belongs to an earlier tick than the one that failed.
+The first sample after a restart is therefore stamped at the restart or
+later (later when its first poll is late), never earlier. Nothing is
+promised across a `stop` and a later `start`.
+
+### The watchdog
+
+Neither condition ends a run or restarts anything.
+
+- **Stall.** Nothing handed on for longer than `stall_after_s` (strictly),
+  measured between the times passed to calls, from the call that last handed
+  on a sample or that started, restarted or resumed the run. Evaluated by
+  `check` and by a `poll` that yields nothing. Not evaluated while paused;
+  pausing clears it. **Only a call can notice a stall. This crate has no
+  timer.**
+- **Falling behind.** After every poll that produced a sample or an error
+  the supervisor reads the provider's cumulative `missed_ticks` and takes
+  the increase. A sample handed on advances the run by that increase plus
+  one slot. Slots form consecutive, non-overlapping windows; a window closes
+  at the first sample with which the slots since the last close reach
+  `missed_window_ticks` (a late poll can overrun it; the excess is not
+  carried over). Falling behind begins as soon as the missed slots of the
+  open window exceed `max_missed_in_window` and ends only when a window
+  closes within the limit. A window continues across a pause; a new run
+  starts with an empty one.
+
+`Supervisor::for_simulation` refuses a stall threshold that is not longer
+than the scenario's update interval; `Supervisor::new`, which cannot know
+the interval, does not.
+
+### Faults of other components
+
+`report_fault(now, component, detail)` and `clear_fault(now, component)`.
+A standing fault makes a run `Degraded`. It never stops samples, ends a run
+or causes a restart. It is listed whatever the lifecycle but changes the
+health only of a run. A failure to store a record reaches the supervisor
+this way and only if the caller relays it; the crate does not depend on
+`locsim-store`.
+
+### Events, totals, and what is never in them
+
+Every state change produces an `Event { at, level, run, kind }` sent to the
+caller's `EventSink` (`NullSink` and a shareable `MemorySink` are provided;
+there is no file or system logging here). Every event passes through one
+function, and the cumulative `Totals` are updated there, from the event:
+each total can be recounted from the event stream (the identities are on
+`Totals`), and tests do so after every step.
+
+No event contains a coordinate, at any level, and there is no event per
+sample. The one free text is the detail of a fault the caller reports.
+
+### What it is not
+
+Not a checkpoint or resume. Not a timer, thread or real-time driver. Not a
+logger to any destination. Not aware of the store, the scenario format or
+any platform. It does not make a failing scenario work.
+
 ## Platform delivery (planned, T11)
 
 Mechanisms in scope:
@@ -810,5 +966,12 @@ integrity checks, defeating third-party anti-spoofing.
 
 ## Privacy
 
-The core never reads the device's real location. Logging (T10) will default to
-not recording coordinates above DEBUG level.
+The core never reads the device's real location.
+
+The health supervisor's events (T10) contain no coordinate at any level and
+there is no event per sample: an event holds times, counts, states and the
+provider's error values, none of which carries a position. A test searches
+the text of every event of eight supervised runs for every coordinate that
+was emitted. The detail string of a fault the caller reports is the caller's
+responsibility. Stored records (T09) do contain positions: the scenario's
+route and origin, and the last emitted sample.

@@ -66,7 +66,7 @@ Other non-goals:
     Geographic Engine              WGS84 geodesics, ENU, ECEF     implemented
     Location Abstraction           LocationProvider trait         implemented (one provider)
     Platform Adapter               C ABI + Swift -> CLLocation    planned (T11)
-    Health / Recovery              metrics, watchdog, retries     planned (T10)
+    Health / Recovery              supervisor, watchdog, restart   implemented (locsim-health)
     Persistence / Storage          digest envelope, atomic replace implemented (locsim-store)
 
 Assumptions (Decisions unless marked):
@@ -112,7 +112,9 @@ Assumptions (Decisions unless marked):
 | Persistence of a scenario and of the last emitted sample (digest, atomic replacement) | Implemented, tested on Windows only; Unix path never run; power loss never tested |
 | Checkpoint / resume of a running simulation | **Not implemented; no ticket owns it.** A stored simulation can only be started again |
 | Stored configuration and preferences | Not implemented: no such types exist; expected with the application (T12) |
-| Health, watchdog, bounded recovery, structured logging | Planned (T10) |
+| Health state, watchdog (stall, missed ticks), bounded restart, structured events | Implemented, tested on Windows only. Recovery is a new run, not a resume. Nothing calls the watchdog: there is no timer |
+| Logging to a file or system log | Not implemented: events go to a sink the caller supplies (platform work, T11/T12) |
+| CPU, memory and battery metrics | Not implemented (T14) |
 | C ABI, Swift adapter, `CLLocation` conversion | Planned (T11) |
 | Demo application | Planned (T12) |
 | Wall-clock soak tests, memory measurements | Planned (T14) |
@@ -139,8 +141,8 @@ in the repository. Its ticket plan is reproduced here so that it is.
 | T07 | Consistency engine | Consistency of speed, course, timestamps, accuracy, position | Done |
 | T08 | Scenario system | Serialisation, validation, import/export, schema versioning (JSON; migration between versions) | Done |
 | T09 | Persistence | Reliable configuration persistence and recovery: active scenario, configuration, last known state, route, preferences, schema version; atomic writes (write temporary, validate, replace) | Done for the scenario (with its route and schema version) and the last-known record. Configuration and preferences: nothing to store yet. Resume: deferred, see below |
-| **T10** | **Health system** | **Health state, metrics, watchdog, bounded recovery (e.g. three retries with backoff, then FAILED), structured logging with levels** | **Next** |
-| T11 | Platform adapter | The authorised iOS delivery/test adapter; document platform limitations | Planned |
+| T10 | Health system | Health state, metrics, watchdog, bounded recovery (e.g. three retries with backoff, then FAILED), structured logging with levels | Done: supervisor, policy, events. "Metrics" are the counters and totals of the report; resource metrics are T14. "Logging" is structured events to a caller-supplied sink |
+| **T11** | **Platform adapter** | **The authorised iOS delivery/test adapter; document platform limitations** | **Next. Needs a Mac with Xcode; only a Rust-side C ABI can be done on the Windows machine used so far** |
 | T12 | Test application | UI and visualisation: current location, speed, course, accuracy, mode, state, health, sample count; start/pause/resume/stop/reset/load/save; map where practical | Planned |
 | T13 | Integration testing | Whole pipeline: scenario → movement → noise → validation → consistency → scheduler → adapter → app | Planned |
 | T14 | Reliability testing | Long-duration runs, repeated start/stop, pause/resume, failure injection, corrupted configuration, memory | Planned |
@@ -149,7 +151,9 @@ in the repository. Its ticket plan is reproduced here so that it is.
 **Unowned work, recorded so it is not lost.** Checkpoint/resume of a running
 simulation (deferred from T09 by decision; it needs engine state the core
 does not expose, see decision D16). Write-through rename on Windows.
-GPX import/export.
+GPX import/export. A timer or driver that calls `poll` and `check` (expected
+with the platform adapter). A bridge from `StoreError` to the supervisor's
+fault reports (expected with the application).
 
 Things the specification asks for that no ticket has delivered yet and that a
 later ticket must pick up: `TestProvider`, `DevelopmentAdapter` and
