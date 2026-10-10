@@ -325,3 +325,117 @@ fn damage_that_the_document_codec_accepts_is_caught_by_the_digest() {
     );
     assert!(tried > 30_000 && different > 1_000);
 }
+
+// --- The last-known record ----------------------------------------------------------
+
+fn last_known(count: u64) -> LastKnown {
+    use locsim_core::domain::{
+        Coordinate, LocationSource, SimulationState, SyntheticLocation, Timestamp,
+    };
+    LastKnown {
+        scenario_fingerprint: 0x3f29_4995_c8f3_1115,
+        sample: SyntheticLocation {
+            timestamp: Timestamp::from_nanos(1_700_000_000_000_000_000 + count as i64),
+            coordinate: Coordinate::new(12.9352, 77.6245).unwrap(),
+            altitude_m: 920.0,
+            horizontal_accuracy_m: 5.0,
+            vertical_accuracy_m: 8.0,
+            speed_mps: Some(1.25),
+            course_deg: Some(90.0),
+            source: LocationSource::Simulation,
+            simulation_state: SimulationState::Running,
+        },
+        state: SimulationState::Running,
+        sample_count: count,
+        failed_count: 0,
+        missed_ticks: 0,
+        trajectory_complete: false,
+    }
+}
+
+#[test]
+fn a_last_known_save_that_fails_at_any_step_keeps_the_previous_record() {
+    for fault in FAULTS_BEFORE_REPLACEMENT {
+        let scratch = Scratch::new("store-last");
+        let real = Store::open(scratch.path()).unwrap();
+        real.save_last_known(&last_known(7)).unwrap();
+        let store = faulty(&scratch, fault);
+        let error = store.save_last_known(&last_known(8)).unwrap_err();
+        assert!(!error.record_was_replaced(), "{fault:?}");
+        assert_eq!(real.load_last_known(), Ok(Some(last_known(7))), "{fault:?}");
+        assert_eq!(scratch.names(), ["last_known.locsim"], "{fault:?}");
+    }
+}
+
+#[test]
+fn damage_to_a_stored_last_known_record_never_yields_another_record() {
+    let text = export_last_known(&last_known(124)).unwrap();
+    let whole = envelope::seal(text.as_bytes());
+    let header = whole.len() - text.len();
+    let interpreted = |bytes: &[u8]| {
+        interpret(
+            Record::LastKnown,
+            Path::new("last_known.locsim"),
+            bytes,
+            import_last_known,
+        )
+    };
+    assert_eq!(interpreted(&whole), Ok(last_known(124)));
+    let mut rng = locsim_core::rng::Rng::from_seed(0x1A57);
+    let (mut tried, mut bare_accepted) = (0u32, 0u32);
+    for _ in 0..20_000 {
+        let offset = (rng.next_u64() % text.len() as u64) as usize;
+        let replacement = b"0123456789-.eE\"{}[],:abcdefnul "[(rng.next_u64() % 31) as usize];
+        if text.as_bytes()[offset] == replacement {
+            continue;
+        }
+        tried += 1;
+        let mut bare = text.clone().into_bytes();
+        bare[offset] = replacement;
+        bare_accepted += u32::from(import_last_known(&String::from_utf8(bare).unwrap()).is_ok());
+        let mut stored = whole.clone();
+        stored[header + offset] = replacement;
+        assert!(matches!(
+            interpreted(&stored),
+            Err(StoreError::Corrupt {
+                cause: Corruption::Envelope(EnvelopeError::DigestMismatch { .. }),
+                ..
+            })
+        ));
+    }
+    println!("last-known damage: {tried} changes; bare {bare_accepted} accepted; stored, none");
+    assert!(tried > 15_000 && bare_accepted > 500);
+}
+
+#[test]
+fn a_record_of_the_other_kind_in_a_records_place_is_corrupt() {
+    // Intact envelopes, wrong contents: the files were swapped.
+    let scratch = Scratch::new("store-swapped");
+    let store = Store::open(scratch.path()).unwrap();
+    store.save_scenario(&scenario(WALKING)).unwrap();
+    store.save_last_known(&last_known(3)).unwrap();
+    let a = scratch.path().join("scenario.locsim");
+    let b = scratch.path().join("last_known.locsim");
+    let (scenario_bytes, record_bytes) = (std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
+    std::fs::write(&a, &record_bytes).unwrap();
+    std::fs::write(&b, &scenario_bytes).unwrap();
+    assert_eq!(
+        corruption(&store),
+        Corruption::Document(vec![ScenarioError::MissingField {
+            path: "schema_version".into()
+        }])
+    );
+    match store.load_last_known() {
+        Err(StoreError::Corrupt {
+            record: Record::LastKnown,
+            cause: Corruption::Document(errors),
+            ..
+        }) => assert_eq!(
+            errors,
+            [ScenarioError::MissingField {
+                path: "record_version".into()
+            }]
+        ),
+        other => panic!("{other:?}"),
+    }
+}

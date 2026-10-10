@@ -1,6 +1,7 @@
-//! File storage for the simulation framework: a scenario kept in a
-//! directory so that it survives the process, written so that a failed or
-//! interrupted save does not destroy what was there.
+//! File storage for the simulation framework: a scenario and the last
+//! sample a provider emitted, kept in a directory so that they survive the
+//! process, written so that a failed or interrupted save does not destroy
+//! what was there.
 //!
 //! This crate is the only one that touches files. It has no third-party
 //! dependency: text formats come from `locsim-scenario`, everything else is

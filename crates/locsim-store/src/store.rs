@@ -2,7 +2,10 @@ use crate::atomic::{self, Files, RealFiles};
 use crate::envelope;
 use crate::error::{Corruption, Operation, Record, StoreError};
 use locsim_core::domain::Scenario;
-use locsim_scenario::{export_scenario, import_scenario, ScenarioError};
+use locsim_scenario::{
+    export_last_known, export_scenario, import_last_known, import_scenario, LastKnown,
+    ScenarioError,
+};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -14,9 +17,20 @@ use std::sync::Mutex;
 /// | Record | File | Payload |
 /// |---|---|---|
 /// | Scenario | `scenario.locsim` | the document `export_scenario` writes |
+/// | Last known | `last_known.locsim` | the document `export_last_known` writes |
 ///
 /// Each file is an envelope (see the crate documentation) around its
-/// payload. The directory is the caller's: `open` creates nothing, and no
+/// payload. The two records are separate files, saved separately: nothing
+/// keeps them in step. Whether a last-known record belongs to the stored
+/// scenario is told by comparing its `scenario_fingerprint` with
+/// `scenario_fingerprint(&scenario)`; a record from another scenario loads
+/// normally and simply does not match.
+///
+/// The last-known record is the last sample handed to
+/// [`Store::save_last_known`]. It is **not a checkpoint**: nothing here can
+/// resume a simulation, and a provider started after a restart begins a new
+/// run. How often to save it is the caller's choice; every save is synced.
+/// The directory is the caller's: `open` creates nothing, and no
 /// path is built in.
 ///
 /// # Saving
@@ -98,6 +112,21 @@ impl Store {
         self.load(Record::Scenario, import_scenario)
     }
 
+    /// Stores a last-known record, replacing the stored one. A record whose
+    /// sample is not fit to emit is refused and nothing is written.
+    pub fn save_last_known(&self, record: &LastKnown) -> Result<(), StoreError> {
+        let text = export_last_known(record).map_err(|errors| StoreError::Invalid {
+            record: Record::LastKnown,
+            errors,
+        })?;
+        self.save(Record::LastKnown, &text)
+    }
+
+    /// The stored last-known record, or `None` if none is stored.
+    pub fn load_last_known(&self) -> Result<Option<LastKnown>, StoreError> {
+        self.load(Record::LastKnown, import_last_known)
+    }
+
     fn save(&self, record: Record, text: &str) -> Result<(), StoreError> {
         // A panic while saving cannot leave shared state half-changed (the
         // guarded value is empty), so a poisoned lock is still usable.
@@ -130,7 +159,7 @@ impl Store {
     /// While a save is in progress its own temporary file is listed too.
     pub fn stale_temporaries(&self) -> Result<Vec<PathBuf>, StoreError> {
         let list = |e: &io::Error| StoreError::io(Operation::List, &self.directory, e);
-        let prefixes: Vec<String> = [Record::Scenario]
+        let prefixes: Vec<String> = [Record::Scenario, Record::LastKnown]
             .iter()
             .map(|r| atomic::temporary_prefix(r.file_name()))
             .collect();
