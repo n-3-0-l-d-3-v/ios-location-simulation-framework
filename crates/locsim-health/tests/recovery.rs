@@ -1010,3 +1010,53 @@ fn the_same_calls_give_the_same_samples_reports_and_events() {
     };
     assert_eq!(run(), run());
 }
+
+// --- Agreement with the core's lifecycle ----------------------------------------------
+
+/// The supervisor decides for itself which calls its lifecycle allows. This
+/// checks that its answers are the ones the core's transition table gives
+/// for the state it reports, in every state it can be in.
+#[test]
+fn which_calls_are_allowed_agrees_with_the_core_transition_table() {
+    use SimulationState::*;
+    let in_state = |state: SimulationState| {
+        let (mut s, provider, events) = scripted(HealthPolicy {
+            max_recovery_attempts: u32::from(state == Recovering),
+            ..policy()
+        });
+        if state != Idle {
+            s.start(t(T0)).unwrap();
+        }
+        match state {
+            Paused => s.pause(t(T0)).unwrap(),
+            Error | Recovering => {
+                provider.fail_next(pipeline_error());
+                s.poll(t(T0)).unwrap_err();
+            }
+            _ => {}
+        }
+        assert_eq!(check(&s, &events).lifecycle, state);
+        s
+    };
+    for state in [Idle, Running, Paused, Recovering, Error] {
+        let allowed = [
+            (Starting, in_state(state).start(t(T0 + SEC / 2)).is_ok()),
+            (Stopping, in_state(state).stop().is_ok()),
+            (Paused, in_state(state).pause(t(T0 + SEC / 2)).is_ok()),
+        ];
+        for (target, accepted) in allowed {
+            assert_eq!(
+                accepted,
+                state.can_transition_to(target),
+                "{state:?} -> {target:?}"
+            );
+        }
+        // Resuming is the transition to Running from Paused only; the
+        // table's Recovering -> Running is the supervisor's own restart.
+        assert_eq!(
+            in_state(state).resume(t(T0 + SEC / 2)).is_ok(),
+            state == Paused,
+            "{state:?}"
+        );
+    }
+}
