@@ -11,7 +11,7 @@ the index of all context documents is
 
     Control / Configuration        (T12 app, CLI)
     Simulation Manager             state machine owner, wires everything
-    Scenario Engine                serialisable scenarios, versioning
+    Scenario Engine                JSON import/export, versioning   [implemented, separate crate]
     Movement Engine                fixed, random walk, walking, driving, orbit, route replay [implemented]
     Route Engine                   route -> trajectory, admission  [implemented]
     Noise / Realism Engine         seeded jitter + drift, bounded  [implemented]
@@ -29,12 +29,14 @@ implemented).
 
 Dependency rule: a layer may import only layers below it plus `domain`/`rng`.
 The platform adapter contains conversion and lifecycle code only.
+`locsim-scenario` depends on the core; the core depends on nothing.
 
 ## Language and packaging
 
 | Part | Choice | Why |
 |---|---|---|
 | Simulation core | Rust crate `locsim-core`, zero dependencies, `#![forbid(unsafe_code)]` | Testable on any desktop OS without an iPhone; bit-reproducible seeded output; cross-compiles to iOS |
+| Scenario documents | Rust crate `locsim-scenario`; depends on `locsim-core`, `serde` (no derive) and `serde_json` (`float_roundtrip`); `#![forbid(unsafe_code)]` | Keeps the core dependency-free while using a widely tested JSON reader and writer; see "Scenario documents" below |
 | Platform boundary | C ABI crate (`locsim-ffi`, T11) | The only stable interface Swift/Obj-C can consume |
 | iOS adapter + demo app | Swift (T11/T12) | Core Location and UI are Apple-only APIs |
 
@@ -508,6 +510,119 @@ Design decisions worth knowing:
   health subsystem's job (T10).
 - `ModelFactory` lets another movement engine be plugged in without modifying
   the provider.
+
+## Scenario documents (`locsim-scenario`, T08)
+
+A separate crate that turns text into a validated `Scenario` and back. It
+reads and writes strings; it opens no file (persistence is T09). The core
+does not know it exists.
+
+    text ── parse ── version ── migrate ── decode ── Scenario::validate ── Scenario
+    Scenario ── Scenario::validate ── encode ── write ── text
+
+### Public interface
+
+- `import_scenario(text) -> Result<Scenario, Vec<ScenarioError>>`
+- `export_scenario(&Scenario) -> Result<String, Vec<ScenarioError>>`
+- `ScenarioError`, and `CURRENT_SCHEMA_VERSION` re-exported from the core.
+
+Import stops at the first stage that reports anything and returns everything
+that stage found. So a document with a syntax error reports only that; one
+with three wrong members reports all three; one that is well formed but
+describes an invalid scenario reports exactly what `Scenario::validate`
+reports. Export validates first and writes nothing for an invalid scenario.
+
+### Modules
+
+- `json` — the document layer. `serde_json` reads and writes; the tree is the
+  crate's own `Json` type, not `serde_json::Value`, because `Value` keeps the
+  last of two duplicate keys silently. Here an object is an ordered list of
+  members, duplicates included, and every duplicate is reported with its
+  path. Integer literals stay integers (exact over `u64` and `i64`);
+  everything else is an `f64` parsed with correct rounding. The writer
+  refuses a non-finite number instead of writing `null`, keeps member order,
+  indents by two spaces and ends with a newline.
+- `migrate` — `MigrationChain { oldest, steps }`. Step `i` rewrites a
+  document tree from version `oldest + i` to the next. A document runs every
+  step from its own version onwards, in order. The chain, not the step,
+  advances `schema_version`; a step that deletes it is an error. A version
+  outside the chain is refused before anything runs. The production chain is
+  `{ oldest: 1, steps: [] }`, tied by a compile-time assertion to the core's
+  `CURRENT_SCHEMA_VERSION`.
+- `schema` — schema version 1: `encode` and `decode` between `Scenario` and
+  `Json`, by hand rather than by derive, so that every problem is collected
+  with its path instead of stopping at the first.
+- `error` — `ScenarioError`.
+
+### Schema version 1
+
+The document mirrors the domain model. Member names are the Rust field names
+with their units, so the path in a structural error is the path
+`Scenario::validate` would use for the same field.
+
+| Member | JSON type | Notes |
+|---|---|---|
+| `schema_version` | integer | `1` |
+| `name` | string | |
+| `origin` | object | `latitude`, `longitude` (numbers, degrees) |
+| `altitude_m` | number | |
+| `mode` | string | `fixed`, `random_walk`, `walking`, `driving`, `circular`, `route_replay` |
+| `movement` | object | the 15 fields of `MovementParameters`; `radius_m`, `step_distance_m`, `angular_velocity_dps`, `max_displacement_per_sample_m` are number or `null`; `direction` is `clockwise` or `counter_clockwise` |
+| `noise` | object | the 8 fields of `NoiseParameters` |
+| `horizontal_accuracy_m`, `vertical_accuracy_m`, `update_interval_s` | number | |
+| `seed` | string | canonical decimal `u64`: `"0"` … `"18446744073709551615"` |
+| `route` | object or `null` | `name` (string or `null`), `points` (array) |
+| `route.points[i]` | object | `elapsed_ns` (integer), `coordinate` (`latitude`, `longitude`), `altitude_m` (number or `null`) |
+| `playback` | object | `speed` (number), `looping`, `reverse` (booleans) |
+
+Rules:
+
+- **Every member is required.** An absent optional value is written `null`.
+  A missing member, an unknown member and a duplicate member are errors.
+  There are no defaults.
+- **Types are exact.** A number member takes any JSON number (`920`, `920.0`
+  and `9.2e2` are the same value). An integer member takes only an integer
+  literal: `1.0` and `1e9` are refused, not rounded. An integer literal too
+  large for 64 bits is refused wherever an integer is required.
+- **The seed is a string**, because a `u64` above 2^53 does not survive tools
+  that read JSON numbers as doubles. Only the canonical spelling is taken: no
+  sign, no leading zeros, no spaces, ASCII digits. A JSON number is refused.
+- **Nothing is normalised.** Coordinates are built with `Coordinate::new`
+  (a longitude of 180.00000000000003 is an error, not a wrap); routes with
+  `Route::new` (out-of-order points are an error, not sorted); enum names are
+  matched exactly.
+- **Paths.** Dotted from the root, list positions in brackets:
+  `route.points[3].coordinate.latitude`. The root is `$`.
+
+### Exactness
+
+Floats are written in the shortest decimal form that reads back to the same
+bits and are read with correct rounding (`serde_json` needs the
+`float_roundtrip` feature for that; without it the random-float test fails).
+Negative zero keeps its sign. Consequently:
+
+- `import(export(s))` is `s` bit for bit, for every valid scenario;
+- `export(import(text))` is the same text for every exported document
+  (member order and number spelling are free on input, fixed on output);
+- a scenario that was exported and imported again drives the provider to a
+  bit-identical stream (contract C1 holds across serialisation).
+
+### What import does not do
+
+- It does not admit a route. `Scenario::validate` checks the cheap necessary
+  conditions (leg mean speeds, a closed route for looping); whether the
+  interpolated trajectory fits the acceleration and heading limits is decided
+  by route admission when a run starts, as before.
+- It does not read or write files, and it does not read GPX.
+
+### Examples
+
+`Examples/Scenarios/` holds eight documents: `fixed`, `random_walk`,
+`walking`, `driving`, `circular`, `route_replay` (an open recording with
+altitude), `antimeridian_loop` (a closed, looping circuit centred on the
+180th meridian) and `high_latitude` (a walk 5.6 km from the North Pole).
+`tests/examples.rs` imports each, checks it is byte-identical to its own
+export, and runs it through `SimulationProvider` and the final gate.
 
 ## Platform delivery (planned, T11)
 

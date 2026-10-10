@@ -4,9 +4,12 @@ The invariants future tickets must preserve. Each names where it is enforced
 and which tests would fail if it broke. Paths are relative to
 `crates/locsim-core/`. Test references are `file::test_function`.
 
-All references were checked to exist at commit `1be8852` (2026-10-09). If one
-no longer resolves, the code moved: find the new home before concluding the
-contract is gone.
+Paths in C19 are relative to `crates/locsim-scenario/`.
+
+References in C1–C18 were checked to exist at commit `1be8852` (2026-10-09);
+T08 changed no file of `locsim-core`. References in C19 were checked at
+`e6bcbf2` (2026-10-10). If one no longer resolves, the code moved: find the
+new home before concluding the contract is gone.
 
 **If a change makes one of these tests fail, the default assumption is that
 the change is wrong, not the test.** A contract may be changed deliberately —
@@ -83,8 +86,7 @@ just the first. There are no `Default` impls on parameter structs.
   `src/domain/route.rs::rejects_out_of_order_and_zero_duration_segments_with_the_index`,
   `src/domain/route.rs::absolute_timestamps_are_shifted_to_the_first_and_nothing_else`,
   `src/route/tests.rs::each_kinematic_limit_is_detected_independently`.
-- T08 applies this directly: unknown schema version, unknown mode, missing
-  field, wrong type — all errors, none defaulted.
+- Scenario documents apply this directly; see C19.
 
 ## C6. Geography goes through the geographic engine
 
@@ -256,6 +258,9 @@ equivalent. `route_props` takes about 25 s in a debug build; that is normal.
   what is on disk (stash the rest). Two T05 commits and one T06 commit show
   what happens otherwise; see `TICKET_HISTORY.md`.
 - Never rewrite or force-push history. No AI attribution lines.
+- Write the commit message, read it back, then commit, as separate steps.
+  Commit `019ad0f` carries another commit's message because the message file
+  had not been rewritten when the commit ran.
 - Update `PROGRESS.md`, `Docs/ARCHITECTURE.md` and, when long-lived context
   changes, the documents in this directory.
 
@@ -264,3 +269,55 @@ equivalent. `route_props` takes about 25 s in a debug build; that is normal.
 No concealment of the framework or a jailbreak, no integrity-check bypass, no
 anti-spoofing evasion, no claims of undetectability. No compatibility claim
 without a run on that exact combination. See `PROJECT_BRIEF.md`.
+
+## C19. Scenario documents are strict, exact and versioned
+
+Added by T08. The crate is `locsim-scenario`; `locsim-core` stays without
+dependencies and without knowledge of JSON.
+
+- **Stages.** Import is parse → version → migrate → strict decode →
+  `Scenario::validate`, in that order; a stage that reports anything ends
+  the import and returns everything it found. Export validates first and
+  writes only a valid scenario. Nothing invalid comes out of either.
+- **No repair.** Every member is required (an absent optional value is
+  `null`); unknown and duplicate members are errors; types are exact (an
+  integer member refuses `1.0`); enum names are exact; coordinates are built
+  with `Coordinate::new` and routes with `Route::new`. Nothing is defaulted,
+  wrapped, clamped, sorted, trimmed or rounded on the way in.
+- **Exact.** `import(export(s))` equals `s` bit for bit, negative zero
+  included. `export(import(text))` equals `text` for exported text. A
+  scenario that went through export and import drives the provider to a
+  bit-identical stream (C1 across serialisation). Seeds cover the whole
+  `u64` range as canonical decimal strings.
+- **Versioned.** A document states its `schema_version`; a version this build
+  cannot read is refused before anything else is looked at. A change to the
+  document shape is a new version plus a migration step in the chain, never
+  an edit to version 1 and never a tolerant decoder. No historical schema is
+  invented: a migration step exists only for a version that was released.
+- **Strings only.** The crate opens no file.
+- Enforced in: `src/lib.rs` (`import_with`, `export_scenario`),
+  `src/json.rs` (`parse`, `find_duplicates`, the `Serialize` impl),
+  `src/migrate.rs` (`MigrationChain`), `src/schema.rs`.
+- Tests: `src/json.rs::every_finite_float_round_trips_bit_exactly`,
+  `src/json.rs::every_duplicate_key_is_reported_with_its_path`,
+  `src/json.rs::writer_refuses_non_finite_numbers_instead_of_writing_null`,
+  `src/schema/tests.rs::arbitrary_finite_scenarios_round_trip_bit_exactly_through_text`,
+  `src/schema/tests.rs::each_missing_member_is_reported_by_its_path`,
+  `src/schema/tests.rs::an_unknown_member_is_rejected_in_every_object`,
+  `src/schema/tests.rs::every_member_refuses_every_json_type_it_does_not_take`,
+  `src/schema/tests.rs::seed_is_a_canonical_decimal_string_over_the_whole_u64_range`,
+  `src/schema/tests.rs::the_sample_document_is_exactly_the_reference_text`,
+  `src/migrate.rs::steps_run_in_order_from_the_documents_version_to_the_newest`,
+  `src/migrate.rs::versions_outside_the_chain_are_refused_without_running_anything`,
+  `src/lib.rs::an_old_document_is_migrated_then_strictly_decoded_and_validated`,
+  `tests/malformed.rs::each_stage_reports_alone_and_before_the_next`,
+  `tests/malformed.rs::an_invalid_scenario_is_reported_exactly_as_scenario_validate_reports_it`,
+  `tests/malformed.rs::export_refuses_an_invalid_scenario_and_says_why`,
+  `tests/malformed.rs::random_damage_never_panics_and_never_lets_an_invalid_scenario_through`,
+  `tests/round_trip.rs::valid_scenarios_and_their_streams_survive_export_and_import_exactly`,
+  `tests/examples.rs::every_example_imports_and_is_already_in_exported_form`,
+  `tests/examples.rs::every_example_runs_through_the_provider_and_the_final_gate`.
+- Do not: switch the document tree to `serde_json::Value` (it drops duplicate
+  keys silently); drop `float_roundtrip` (floats stop reading back exactly);
+  derive `Deserialize` with defaults; accept a JSON number as a seed; upgrade
+  `serde_json` without running the float and round-trip tests.

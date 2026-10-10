@@ -17,8 +17,14 @@ tooling is needed for the simulation core.
   public APIs, radians only inside geodesy functions.
 - No silent defaults for critical parameters: parameter structs have no
   `Default`; validation returns every problem as a `ConfigError { field, reason }`.
-- No new dependency in `locsim-core` without a written justification in the
-  crate's `Cargo.toml`. Randomness comes only from `rng::Rng` (seeded).
+- `locsim-core` has no dependencies and stays that way. No new dependency in
+  any crate without a written justification in that crate's `Cargo.toml`
+  (`locsim-scenario` carries one for `serde` and `serde_json`). Randomness
+  comes only from `rng::Rng` (seeded).
+- Scenario documents: `cargo test -p locsim-scenario`. The files in
+  `Examples/Scenarios/` must stay byte-identical to their own export; a test
+  checks it, and a new file there must be added to
+  `crates/locsim-scenario/tests/support/mod.rs`.
 - Property tests use fixed seeds and print the failing case index.
 - Workflow per ticket: implement → test → `validate.sh` → commit and push each
   logical change → update `PROGRESS.md` and the context documents. The full

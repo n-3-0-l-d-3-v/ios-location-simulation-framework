@@ -58,7 +58,7 @@ Other non-goals:
 
     Control / Configuration        app, CLI                      planned (T12)
     Simulation Manager             owns state machine, wiring     partly: SimulationProvider
-    Scenario Engine                serialisable scenarios         planned (T08); types exist
+    Scenario Engine                strict versioned JSON           implemented (locsim-scenario)
     Movement Engine                fixed/walk/drive/orbit/replay  implemented
     Route Engine                   route -> trajectory, admission implemented
     Noise / Realism Engine         seeded jitter, drift           implemented
@@ -73,6 +73,9 @@ Assumptions (Decisions unless marked):
 
 - The simulation core is a Rust crate with no dependencies, testable on any
   desktop OS with no Apple tooling. **Verified** on Windows only.
+- Anything that needs a dependency lives in its own crate on top of the
+  core. So far that is `locsim-scenario` (`serde`, `serde_json`).
+  **Verified** on Windows only.
 - iOS will be reached through a C ABI crate and a Swift adapter. **Planned.**
   Nothing has been cross-compiled for `aarch64-apple-ios`. **Unverified** that
   the core builds for it.
@@ -100,7 +103,9 @@ Assumptions (Decisions unless marked):
 | Final validation gate | Implemented, tested on desktop |
 | Provider with lifecycle, pause/resume, completion | Implemented, tested on desktop |
 | Real-time driver (something that sleeps until the next tick) | Not implemented |
-| Scenario JSON, schema versioning, migration | Planned (T08) |
+| Scenario JSON import/export, schema versioning | Implemented, tested on desktop |
+| Migration between schema versions | Mechanism implemented and tested with test-only steps; no real migration exists (only version 1) |
+| GPX import/export | Not implemented; no ticket owns it yet (T11 mentions GPX for delivery) |
 | Persistence | Planned (T09) |
 | Health, watchdog, bounded recovery, structured logging | Planned (T10) |
 | C ABI, Swift adapter, `CLLocation` conversion | Planned (T11) |
@@ -127,8 +132,8 @@ in the repository. Its ticket plan is reproduced here so that it is.
 | T05 | Movement engine | Walking, driving, bounded random walk, circular | Done |
 | T06 | Route engine | Route loading, interpolation, playback, pause/resume, looping, playback speed | Done |
 | T07 | Consistency engine | Consistency of speed, course, timestamps, accuracy, position | Done |
-| **T08** | **Scenario system** | **Serialisation, validation, import/export, schema versioning (JSON; migration between versions)** | **Next** |
-| T09 | Persistence | Reliable configuration persistence and recovery: active scenario, configuration, last known state, route, preferences, schema version; atomic writes (write temporary, validate, replace) | Planned |
+| T08 | Scenario system | Serialisation, validation, import/export, schema versioning (JSON; migration between versions) | Done |
+| **T09** | **Persistence** | **Reliable configuration persistence and recovery: active scenario, configuration, last known state, route, preferences, schema version; atomic writes (write temporary, validate, replace)** | **Next** |
 | T10 | Health system | Health state, metrics, watchdog, bounded recovery (e.g. three retries with backoff, then FAILED), structured logging with levels | Planned |
 | T11 | Platform adapter | The authorised iOS delivery/test adapter; document platform limitations | Planned |
 | T12 | Test application | UI and visualisation: current location, speed, course, accuracy, mode, state, health, sample count; start/pause/resume/stop/reset/load/save; map where practical | Planned |

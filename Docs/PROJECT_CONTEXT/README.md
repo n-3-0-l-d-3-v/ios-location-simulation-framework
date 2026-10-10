@@ -5,8 +5,9 @@ conversation (human or AI) that has none of the history. It holds the
 long-lived context: what the project is, why it is built the way it is, what
 must not be broken, what has been done, and how to resume.
 
-It was written on 2026-10-09 at commit `1be8852`, after ticket T07 and before
-T08. **Everything here can go stale. The repository is the truth; these
+It was written on 2026-10-09 at commit `1be8852`, after ticket T07, and
+updated on 2026-10-10 at commit `e6bcbf2`, after ticket T08 and before T09.
+**Everything here can go stale. The repository is the truth; these
 documents are a map of it.**
 
 ## Reading order for a new session
@@ -17,7 +18,7 @@ documents are a map of it.**
 | 2 | [PROJECT_BRIEF.md](PROJECT_BRIEF.md) | Purpose, scope, non-goals, safety boundaries, the full ticket plan | Always |
 | 3 | [ENGINEERING_CONTRACTS.md](ENGINEERING_CONTRACTS.md) | The invariants every ticket must preserve, with the source and tests that enforce them | Always, before changing code |
 | 4 | [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md) | Why each layer is the way it is; rejected alternatives | Before any design decision |
-| 5 | [TICKET_HISTORY.md](TICKET_HISTORY.md) | T00–T07: what each did, its commits, its mistakes | When you need to know how something got here |
+| 5 | [TICKET_HISTORY.md](TICKET_HISTORY.md) | T00–T08: what each did, its commits, its mistakes | When you need to know how something got here |
 | 6 | [NEXT_CHAT_PROMPT.md](NEXT_CHAT_PROMPT.md) | The copy-paste prompt that starts a fresh session | To start a session |
 
 Outside this directory:
@@ -67,13 +68,15 @@ been run on an iPhone, an iOS Simulator, or any Apple platform.**
 
 ## Current state in five lines
 
-- Tickets T00–T07 are complete: a dependency-free Rust simulation core
+- Tickets T00–T08 are complete: a dependency-free Rust simulation core
   (`crates/locsim-core`) that generates, perturbs, validates and emits a
-  consistent synthetic location stream.
-- Verified at `1be8852` on 2026-10-09 (Windows 11, rustc 1.98.1): 273 tests
+  consistent synthetic location stream, and a separate crate
+  (`crates/locsim-scenario`) that imports and exports scenarios as strict,
+  versioned JSON.
+- Verified at `e6bcbf2` on 2026-10-10 (Windows 11, rustc 1.98.1): 343 tests
   pass, `cargo fmt --check` and `cargo clippy -D warnings` are clean.
 - There is no iOS code of any kind: no C ABI, no Swift, no app.
-- There is no serialisation, persistence, health monitoring, logging or
-  real-time driver yet.
-- **Next ticket: T08 — Scenario system (JSON import/export, schema
-  versioning, migration). Not started.**
+- There is no persistence (nothing touches a file), health monitoring,
+  logging or real-time driver yet.
+- **Next ticket: T09 — Persistence (atomic, validated storage of scenario,
+  configuration and state). Not started.**

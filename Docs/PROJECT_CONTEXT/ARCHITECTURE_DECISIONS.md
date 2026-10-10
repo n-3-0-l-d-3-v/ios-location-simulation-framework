@@ -20,7 +20,8 @@ Each decision says where its rationale comes from:
 
 Stated in `crates/locsim-core/src/lib.rs`. A module may use modules to its
 left. `consistency` uses only `domain` and `geographic`; `validation` uses
-`consistency`; `provider` wires everything. Platform code, when it exists,
+`consistency`; `provider` wires everything. `locsim-scenario` is a second
+crate on top of the core (D14). Platform code, when it exists,
 sits outside this crate and contains conversion and lifecycle only.
 
 ## D1. The core is a dependency-free Rust crate (recorded, session)
@@ -40,8 +41,8 @@ sits outside this crate and contains conversion and lifecycle only.
 - **Consequence.** The repository layout is a Cargo workspace, not the
   `Sources/` + `Tests/` tree of the specification. Unit tests sit beside the
   code; property and pipeline tests are in `crates/locsim-core/tests/`.
-- **Open for T08.** JSON needs either a justified dependency or a hand-written
-  codec. See `CURRENT_STATE.md`.
+- **Settled in T08.** JSON lives in a separate crate with justified
+  dependencies; the core is untouched. See D14.
 
 ## D2. Validated types instead of validated values (recorded)
 
@@ -246,13 +247,78 @@ sits outside this crate and contains conversion and lifecycle only.
   hardware has been available to verify anything.
 - **Fixed regardless.** The scope boundaries in `PROJECT_BRIEF.md`.
 
+## D14. Scenario JSON is a separate crate on `serde_json` (recorded, T08)
+
+- **Decision (project owner, 2026-10-10).** A new crate `locsim-scenario`
+  depends on `locsim-core`, `serde` and `serde_json` with `float_roundtrip`.
+  `locsim-core` keeps no dependencies.
+- **Why a separate crate.** D1 stays true where it matters: nothing that
+  produces the sample stream depends on third-party code, and the core that
+  T11 will expose over an FFI boundary carries no text parsing.
+- **Why `serde_json` rather than a hand-written reader.** Reading JSON is
+  correctness- and safety-sensitive text handling (escapes, surrogates, the
+  number grammar, recursion limits). A widely used, fuzzed implementation
+  was preferred. A hand-written codec in the new crate was the alternative
+  offered; the owner chose the dependency.
+- **Why `float_roundtrip`.** Without it `serde_json` does not always parse a
+  float to the nearest double. Verified: with the feature removed, the
+  random-float round-trip tests fail.
+- **Why no derive, and our own tree.** `serde` is used only for the traits
+  `serde_json` drives. The schema is decoded by hand from the crate's own
+  ordered `Json` tree because (a) `serde_json::Value` silently keeps the last
+  of two duplicate keys, (b) a derived decoder stops at the first error
+  while C5 asks for all of them with paths, (c) the default serializer
+  writes NaN as `null`. Without derive no proc-macro crate is compiled:
+  the build adds `serde`, `serde_core`, `serde_json`, `itoa`, `memchr`,
+  `zmij`.
+- **Cost.** The project now has a `Cargo.lock` that matters. A dependency
+  upgrade is a reviewed change, checked by the float and round-trip tests.
+
+## D15. The scenario document: shape, strictness, seed, versions (recorded, T08)
+
+- **Shape.** The document mirrors the domain model, with the Rust field names
+  and their units as member names. Paths in decode errors are then the paths
+  `Scenario::validate` already uses. The specification's short example
+  (`speed.min`, `jitter.radius`, `updateInterval`) is *not* the schema: the
+  domain model has many more required values and, by D2, no defaults. It is
+  refused, and a test pins the refusal.
+- **Everything required, explicit `null`.** An optional value that is absent
+  is written `null`. A missing member is an error. This keeps "nothing was
+  defaulted" checkable by reading the file.
+- **Seed as a canonical decimal string (project owner).** A `u64` above 2^53
+  is damaged by any tool that reads JSON numbers as doubles; a string is
+  safe everywhere. Only the canonical spelling is accepted so that one seed
+  has one text. **Rejected:** a JSON number (the specification's example
+  writes one; exact in our reader, lossy elsewhere).
+- **Integers are integers.** `schema_version` and `elapsed_ns` refuse `1.0`
+  and `1e9`. Accepting them would be rounding by another name.
+- **Canonical output.** Fixed member order, shortest round-trip floats, two
+  spaces, trailing newline. Input may use any order and any valid number
+  spelling. So files can be compared byte for byte, and the examples are
+  kept identical to their own export by a test.
+- **Stages stop early.** A later stage is not run on a document an earlier
+  stage refused: a structurally wrong document has no `Scenario` to validate.
+  Within a stage everything is reported.
+- **Migration on the tree, before typing.** A step is a function on the
+  document tree from one version to the next; the chain advances the version
+  and the strict decoder reads the result, so a step that leaves something
+  behind is caught. **Rejected:** keeping old Rust types per version (heavy,
+  and nothing to keep yet); a tolerant decoder that accepts several shapes
+  (silent repair). **Not done on purpose:** no historical schema was invented
+  to give the production chain a step. The mechanism is tested with chains
+  that exist only in tests, including a pretend "version 0" that production
+  refuses.
+- **Import does not admit routes.** Admission stays where D9 put it, at the
+  start of a run, against the limits in force then.
+- **Uncertain.** Whether errors from `Scenario::validate` should carry line
+  and column. They do not; only syntax errors do.
+
 ## Decisions a future ticket will have to make
 
-- T08: dependency policy for JSON; where the codec lives; field naming versus
-  the specification's example; what a schema migration is when there is only
-  version 1.
 - T09: what "last known simulation state" means for a provider that is a
-  pure function of time.
+  pure function of time; where persistence lives; whether the private `json`
+  layer of `locsim-scenario` is exposed for other stored documents; atomic
+  replace on platforms that cannot be tested here.
 - T10: whether recovery re-creates the run or resumes it, and what the
   deriver and validator state should be afterwards.
 - T11: everything in D13.

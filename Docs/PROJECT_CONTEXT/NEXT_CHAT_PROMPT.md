@@ -6,8 +6,8 @@ the session to work out the next ticket from the repository rather than
 assuming one. The only line you may want to edit is the optional
 "Ticket override" at the end.
 
-As of 2026-10-09 the ticket a fresh session is expected to arrive at is
-**T08 — Scenario system**.
+As of 2026-10-10 the ticket a fresh session is expected to arrive at is
+**T09 — Persistence**.
 
 ---
 

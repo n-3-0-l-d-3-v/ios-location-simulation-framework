@@ -1,4 +1,4 @@
-# Ticket history: T00–T07
+# Ticket history: T00–T08
 
 What each completed ticket was for, what it built, what it decided, how it
 was tested, what it left open, and which commits it consists of.
@@ -9,7 +9,8 @@ How to read the evidence:
   2026-10-09. `git show <hash>` is the authority on what a commit contains.
 - **Test counts at the close of each ticket** are *reported*: taken from
   `PROGRESS.md` as written at the time, not re-run at those commits. Only the
-  final count (273 at `1be8852`) was re-run when this file was written.
+  final count (273 at `1be8852`) was re-run when this file was written. The
+  T08 counts were observed in the session that did the work.
 - **Statistics** (pairs re-checked, closest approach to a limit, and so on)
   are *reported* from test output. They are printed by the tests themselves
   and can be reproduced with `cargo test -- --nocapture`.
@@ -188,7 +189,59 @@ change" agreement, which the project owner asked for immediately afterwards.
 ## After T07 — context documentation
 
 Not a ticket. This directory was added, and stale statements found during
-the audit were corrected (see `CURRENT_STATE.md`, "Discrepancies found").
+the audit were corrected (commits `bb2a354`, `0b603cd`).
+
+## T08 — Scenario system
+
+- **Purpose.** Give a `Scenario` a text form: import, export, validation,
+  schema versioning and migration.
+- **Decided by the project owner before work began.** A separate crate on
+  `serde` + `serde_json` (`float_roundtrip`), core kept dependency-free;
+  seeds as canonical decimal strings; duplicate and unknown keys, missing
+  members, wrong types, unsupported versions and invalid scenarios all
+  refused with no defaults or repair; parse → version → migrate → decode →
+  validate, and export validates first; migration infrastructure without an
+  invented historical schema; eight example scenarios.
+- **Built.** Crate `locsim-scenario`: `json` (ordered document tree over
+  `serde_json`, duplicate keys reported, exact integers, non-finite numbers
+  refused on writing), `schema` (version 1, hand-written strict `encode` /
+  `decode` that collects every error with its path), `migrate`
+  (`MigrationChain`, production chain empty), `error` (`ScenarioError`),
+  and the two entry points `import_scenario` / `export_scenario`.
+  `Examples/Scenarios/` with eight documents. `locsim-core`: no file changed.
+- **Key decisions.** D14 (separate crate, dependencies, no derive, own
+  tree) and D15 (document shape, strictness, seed, canonical output,
+  migration on the tree). Contract C19.
+- **Changed existing behaviour.** None. No engine, gate or domain code was
+  touched; the 273 core tests are the same tests.
+- **Found by tests.** `float_roundtrip` is necessary (removing it fails the
+  float tests). `serde_json::Value` drops duplicate keys and the default
+  serializer writes NaN as `null` — both avoided by the crate's own tree.
+  Two wrong expectations in new tests (hand-miscounted refusal totals; six
+  date-line crossings where three laps give five) were corrected against a
+  derivation, not against the output.
+- **Tests at close (observed 2026-10-10).** 343 in the workspace: 273 core,
+  70 scenario (42 unit, 11 examples, 15 malformed, 2 round-trip). Reported
+  statistics: 200 000 random floats and 4 000 arbitrary scenarios bit-exact
+  through text; 210 random valid scenarios with bit-identical provider
+  streams after export → import, 40 097 pairs re-checked; examples 13 608
+  pairs; 32 000 random damages, none panicking, none letting an invalid
+  scenario through; ten mutation checks, all caught.
+- **Mistake.** Commit `019ad0f` contains the example documents and
+  `tests/examples.rs` but has the message of the commit before it
+  (`7547565`), because the commit ran before the message file was rewritten.
+  The content was tested first (326 passing at that point). Intended title:
+  "examples: eight scenario documents, each run through the provider and
+  gate". History was not rewritten; the next commit message records it.
+- **Left open.** No real migration exists to prove the mechanism on a
+  released schema. `rust-version` 1.75 unverified for the new crate too.
+  Validation errors carry a path but no line or column. Import does not
+  admit routes (by design). GPX is not handled by any ticket so far. The
+  `json` layer is private; T09 may want it.
+- **Commits.** `5014030` (document layer), `31753c9` (schema v1),
+  `7547565` (version check, migration, import/export), `019ad0f` (examples
+  and their tests; mislabelled, see above), `e6bcbf2` (malformed-input and
+  round-trip tests), then the documentation commit that closed the ticket.
 
 ---
 
@@ -200,5 +253,10 @@ the audit were corrected (see `CURRENT_STATE.md`, "Discrepancies found").
 - Property tests with declared-tight limits (a few parts per million above
   what the engine needs) are what found the real defects.
 - Test what is staged, not what is on disk, when committing a subset.
+- Write the commit message, read it, then commit. Never in one step with
+  anything that can fail (`019ad0f`).
+- An expected number in a test is derived, not copied from the first run.
+  When a new test fails, first ask whether the expectation or the code is
+  wrong, and say which it was.
 - A parameter's documentation is a contract too: T04's `max_offset_rate_mps`
   said one thing and did a weaker one for three tickets.
