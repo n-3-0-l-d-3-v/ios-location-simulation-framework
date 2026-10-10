@@ -1,0 +1,14 @@
+[package]
+name = "locsim-store"
+description = "Crash-safe file storage of locsim scenarios and last-known records"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# No third-party dependency: files, atomic replacement and the SHA-256
+# payload digest use the standard library and code in this crate. The text
+# formats of the stored documents come from locsim-scenario.
+[dependencies]
+locsim-core = { path = "../locsim-core" }
+locsim-scenario = { path = "../locsim-scenario" }
