@@ -6,7 +6,8 @@ long-lived context: what the project is, why it is built the way it is, what
 must not be broken, what has been done, and how to resume.
 
 It was written on 2026-10-09 at commit `1be8852`, after ticket T07, and
-updated on 2026-10-10 at commit `fcda25c`, after ticket T10 and before T11.
+updated on 2026-10-10 after ticket T10, and on 2026-10-11 at commit
+`e7fad44`, during ticket T11 (after the implementation stages of T11A).
 **Everything here can go stale. The repository is the truth; these
 documents are a map of it.**
 
@@ -18,7 +19,7 @@ documents are a map of it.**
 | 2 | [PROJECT_BRIEF.md](PROJECT_BRIEF.md) | Purpose, scope, non-goals, safety boundaries, the full ticket plan | Always |
 | 3 | [ENGINEERING_CONTRACTS.md](ENGINEERING_CONTRACTS.md) | The invariants every ticket must preserve, with the source and tests that enforce them | Always, before changing code |
 | 4 | [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md) | Why each layer is the way it is; rejected alternatives | Before any design decision |
-| 5 | [TICKET_HISTORY.md](TICKET_HISTORY.md) | T00–T10: what each did, its commits, its mistakes | When you need to know how something got here |
+| 5 | [TICKET_HISTORY.md](TICKET_HISTORY.md) | T00–T10 and T11A: what each did, its commits, its mistakes | When you need to know how something got here |
 | 6 | [NEXT_CHAT_PROMPT.md](NEXT_CHAT_PROMPT.md) | The copy-paste prompt that starts a fresh session | To start a session |
 
 Outside this directory:
@@ -66,18 +67,25 @@ Each document labels its claims. The labels mean:
 desktop host. Neither means it works on iOS. **Nothing in this project has
 been run on an iPhone, an iOS Simulator, or any Apple platform.**
 
-## Current state in five lines
+## Current state in six lines
 
 - Tickets T00–T10 are complete: a dependency-free Rust simulation core
   (`crates/locsim-core`); strict, versioned JSON for scenarios and for a
   last-known record (`crates/locsim-scenario`); file storage of both with a
   digest and atomic replacement (`crates/locsim-store`); and a supervisor
   with a watchdog, bounded restart and events (`crates/locsim-health`).
-- Verified at `fcda25c` on 2026-10-10 (Windows 11, rustc 1.98.1): 516 tests
-  pass, `cargo fmt --check` and `cargo clippy -D warnings` are clean.
-- There is no iOS code of any kind: no C ABI, no Swift, no app. Nothing has
-  run on any system but one Windows machine.
+- Ticket T11 is open, in two parts. **T11A**, a C interface to a supervised
+  session (`crates/locsim-ffi`, with a public header and a C harness), is
+  implemented and awaiting its closing review. **T11B**, the Apple side, is
+  not started.
+- Verified on 2026-10-11 (Windows 11, rustc 1.98.1), code as of `e7fad44`:
+  594 tests pass, `cargo fmt` and `cargo clippy -D warnings` are clean, and
+  the C harness passes with MSVC and with MinGW gcc. The harness is a
+  separate command; `cargo test` does not run it.
+- There is no Apple code of any kind: no Swift, no app. Nothing has been
+  built or run on any system but one Windows machine.
 - A stored or failed simulation cannot be resumed, only started again.
-  There is no timer or real-time driver: everything is polled.
-- **Next ticket: T11 — Platform adapter. Not started, and not completable
-  on the Windows machine used so far: it needs a Mac with Xcode.**
+  There is no timer or real-time driver: everything is polled. One core
+  defect is open (a sample after a pause and resume can be rejected).
+- **Next: the closing review of T11A, then T11B, which cannot be done on
+  the Windows machine used so far: it needs a Mac with Xcode.**

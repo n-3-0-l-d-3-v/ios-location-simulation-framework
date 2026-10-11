@@ -5,10 +5,21 @@ long-lived project context, the invariants to preserve and how to resume in a
 new session, start at [Docs/PROJECT_CONTEXT/README.md](Docs/PROJECT_CONTEXT/README.md).
 
 ## Current Ticket
-T11 — Platform adapter (not started)
+T11 — Platform adapter (open), split into two parts:
+- **T11A — the C interface** (`crates/locsim-ffi`, tested on Windows).
+  Implementation stages 1–5 are done and reviewed. The documentation stage
+  is written and awaiting review. **Not closed.**
+- **T11B — everything Apple** (building for Apple targets, Swift,
+  `CLLocation`, a driver and its clock, GPX, the Simulator). **Not started;
+  blocked: it needs a Mac with Xcode.**
+
+T11 is complete only when T11B has been implemented and run with Apple
+tooling.
 
 ## Status
-T00–T10 complete and tested on Windows. No iOS code exists yet.
+T00–T10 complete and tested on Windows. T11A is implemented and tested on
+Windows, from Rust and from a C program. No Apple code exists, and nothing
+has been built or run for any Apple platform.
 Repository: https://github.com/n-3-0-l-d-3-v/ios-location-simulation-framework
 
 ## Completed
@@ -48,12 +59,55 @@ Repository: https://github.com/n-3-0-l-d-3-v/ios-location-simulation-framework
   - `locsim-core`, `locsim-scenario` and `locsim-store`: no file changed.
 
 ## Current Work
-- None in flight.
+T11A, awaiting its closing review. It delivered a fifth crate,
+`crates/locsim-ffi`, depending on the core, health and scenario crates and
+on nothing outside the workspace:
+- **One thing is exposed: a supervised simulation session**, built from a
+  scenario document and a health policy. Fifteen functions: version, create,
+  destroy, start, stop, pause, resume, poll, next deadline, check, health,
+  report fault, clear fault, next event, events dropped. The store is not
+  exposed, and there is no simulation mathematics in the crate.
+- **The header**, `crates/locsim-ffi/include/locsim.h`, with the contract
+  for pointers, outputs, time, threads and panics. The compiler checks every
+  struct's size, alignment and field offsets.
+- **A session is an integer handle**, never a pointer. A handle that was
+  destroyed or never issued is a reported error. No handle is issued twice.
+- **No call waits for a session.** One in use is `LOCSIM_ERR_BUSY`, and
+  nothing happened. Destroying a session another thread is using is allowed
+  and is refused the same way until that call returns.
+- **A panic does not reach the caller.** The call returns
+  `LOCSIM_ERR_PANIC`, the session answers `LOCSIM_ERR_POISONED` until it is
+  destroyed, and other sessions are unaffected.
+- **Events** wait in a bounded queue of fixed-size records: times, counts
+  and codes, no text and no position. A full queue discards its oldest
+  record and counts it.
+- **A fault** is reported by the code of one of three components. There is
+  no text parameter.
+- **This is the only crate with `unsafe`**; the other four still forbid it.
+- **The C harness**, `crates/locsim-ffi/harness/harness.c`, built and run by
+  `crates/locsim-ffi/harness/run.sh`. **`cargo test` does not run it.**
+- The four older crates: no behaviour changed. One doc comment was reworded
+  (`Timestamp`, see "Time" below).
+
+T11A decisions are D18; its contract is C22; its history is in
+`Docs/PROJECT_CONTEXT/TICKET_HISTORY.md`.
+
+### Time
+A timestamp is nanoseconds on a time scale the caller chooses, with an
+arbitrary origin. Samples, deadlines, reports and events are on the same
+scale. Callers should not pass a time earlier than one already given to the
+same session. Unix-epoch times are not required; the core's `SystemClock`
+produces them by its own choice. (Contract C2.)
 
 ## Tests
-Last full run (2026-10-10, Windows 11, rustc 1.98.1, commit `fcda25c`):
-**516 passed, 0 failed.** `cargo fmt --check` clean;
+Last full run (2026-10-11, Windows 11, rustc 1.98.1, code as of commit
+`e7fad44`): **594 passed, 0 failed.** `cargo fmt --all -- --check` clean;
 `cargo clippy --all-targets --all-features -- -D warnings` clean.
+
+The C harness is a separate command, `crates/locsim-ffi/harness/run.sh`.
+Last run at `e7fad44`: exit 0 in all six configurations (MSVC against the
+DLL and against the static library, MinGW gcc against the DLL; debug and
+release), about 385 000 checks each.
 
 | Crate | Suite | Tests |
 |---|---|---|
@@ -66,6 +120,42 @@ Last full run (2026-10-10, Windows 11, rustc 1.98.1, commit `fcda25c`):
 | `locsim-health` | `recovery` | 25 |
 | `locsim-health` | `watchdog` | 18 |
 | `locsim-health` | `accounting` | 7 |
+| `locsim-ffi` | Unit: `registry` 8, `session` 28, `ops` 29, `events` 5, `codes` 5 | 75 |
+| `locsim-ffi` | `header` | 3 |
+
+T11A figures:
+- Every call of every test script is made on a session and on a supervisor
+  built alike, and after each call the status, the sample, the next
+  deadline, the health report and the events must be equal: all eight
+  examples, three time origins, a failing run and its restarts, a stall,
+  faults, a pause. All twenty kinds of event are produced.
+- Shifting every time of a script by a constant shifts the timestamps and
+  deadlines by it and changes nothing else, bit for bit.
+- From C: about 385 000 checks per run; the samples of all eight examples
+  equal the Rust supervisor's byte for byte; 3 000 create, use and destroy
+  cycles; the limit of 1 024 sessions; two threads on one session (about
+  180 000 calls refused as busy per run, none that did anything else); 300
+  rounds of destroying a session in use; eight threads with sessions of
+  their own.
+- Mutation checks: 29 deliberate breaks (6 in stage 1, 8 in stage 2, 1 in
+  its follow-up, 10 in stage 3, 4 against the C harness: two in the header,
+  two in the library), all caught and restored.
+
+Findings during T11A:
+- **A natural pipeline failure exists.** Pausing and resuming two of the
+  example scenarios makes the gate reject a sample. It is a defect of the
+  core, open, and described under "Known Issues" below.
+- `CoordinateError` carries the out-of-range value it refused, so the text
+  of a provider's error can contain a latitude or longitude that was never
+  emitted. The C interface passes an error's code only.
+- A test that failed while holding a session left it registered, and the
+  tests that count sessions then failed too. The test guards now destroy
+  what a test created.
+- Wrong expectations of mine, corrected by derivation: how many samples a
+  script yields; that every example runs through a pause; in the C harness,
+  how many calls a lifecycle walk refuses, and that a session two threads
+  poll stays "healthy" (a poll refused as busy did not happen, so ticks are
+  missed).
 
 T10 figures, printed by the tests (`cargo test -p locsim-health -- --nocapture`):
 - Pass-through: all eight examples, punctual and jittered, supervised stream
@@ -92,7 +182,9 @@ Findings during T10:
   failure came from timing.
 - **No pipeline failure has ever occurred naturally** in the suite. Every
   failure in the T10 tests is injected (a failing movement model through the
-  public `ModelFactory`, or a scripted provider).
+  public `ModelFactory`, or a scripted provider). *(True of the suite as it
+  was at T10. T11A found one: the pause/resume defect under "Known
+  Issues".)*
 - **The stale-timestamp check never acts on the real provider.** With the
   check removed, only the scripted-provider tests fail. For
   `SimulationProvider` the order follows from the scheduler.
@@ -128,7 +220,8 @@ Findings during T10:
   - The last-known record (T09) carries no run number.
   - Persistence faults reach health only if the caller reports them; there
     is no bridge from `StoreError`.
-  - Not verified: use from several threads; any build but Windows.
+  - Not verified: any build but Windows. A supervisor is reached from
+    several threads only through `locsim-ffi`, one call at a time.
 - **Persistence (T09):** nothing run on a Unix-like system; nothing tested
   under power loss; on Windows the rename is not confirmed durable; one
   writer per directory; no checkpoint/resume (unowned).
@@ -136,44 +229,88 @@ Findings during T10:
   `7547565` by mistake. History is left as it is.
 - Scenario documents (T08): no defaults; seeds are strings; import does not
   admit a route; only schema version 1 exists.
-- `rust-version = "1.75"` is unverified for all four crates.
+- `rust-version = "1.75"` is unverified for all five crates.
 - Carried over: speed is an interval mean; the first sample of a run has no
   speed or course; the noise engine computes a speed and course nothing
   uses; raw GPS logs are usually not admissible as routes; no real-time
   driver; nothing has run on iOS.
-
-- **Open defect in the core, found during T11A and not fixed there:
-  pausing and resuming a moving scenario can make the next sample fail the
-  gate.** After a resume the world has stood still while the timestamps
-  moved on, so the derived speed (distance over elapsed time) drops, and the
-  validator's speed-change stage rejects the first sample after the resume
-  (`DecelerationExceeded`) or the one after it (`AccelerationExceeded`).
-  Seen on `antimeridian_loop.json` and `driving.json` for pauses from about
-  10 ms to about 10 s; very short and very long pauses pass, as do slow or
-  noisy scenarios, which is why the two existing pause tests (an hour, a
-  day) pass. The supervisor then replaces the run. Not caused by and not
-  changed by `locsim-ffi`. It needs its own ticket: any fix must come with
-  tests over a range of pause lengths and a test that a real teleport
-  across a pause is still rejected.
+- **The C interface (T11A):**
+  - Built and run on Windows x86_64 only, with the library built by the
+    MSVC Rust toolchain. See `Docs/COMPATIBILITY.md` for exactly what was
+    run and what was not.
+  - Nothing calls a session: there is no timer or driver. A stall is
+    noticed only by a call.
+  - Two calls on one session do not wait: one is refused as busy and did
+    not happen. A poll that was refused can miss its tick; one thread
+    should poll a session.
+  - The C harness cannot force two calls to collide, and cannot reach the
+    panic paths. Those are forced only in the Rust tests.
+  - Health reports list causes and faults as bit sets: their order is not
+    kept. An error crosses as its code; what it carried does not.
+  - The events of a session that panicked are lost with it.
+  - Argument types in the header are checked by use, not mechanically. The
+    header has not been compiled as C++.
+  - `unsafe` is checked by tests and by reading; Miri has not been run.
+  - A change to the header of any kind needs a new `LOCSIM_ABI_VERSION`.
+- **Open defect in the core: a sample after a pause and a resume can be
+  rejected by the gate. Unresolved.** Found during T11A; it is in
+  `locsim-core`, it is not caused by `locsim-ffi`, and T11A did not change
+  it.
+  - *Observed.* On `SimulationProvider` alone, for `antimeridian_loop.json`
+    and `driving.json`: after `pause` and `resume`, the first sample is
+    refused with `ValidationError::DecelerationExceeded`, or it is emitted
+    and the next one is refused with `AccelerationExceeded`. Seen for
+    pauses from about 10 ms to about 10 s. Pauses of 1 ms and of a minute
+    or more passed, and the other six examples passed at every length
+    tried. The supervisor then replaces the run, as for any failed run.
+  - *Suspected cause, not proven.* How four things meet: a resume shifts
+    the schedule, so the next timestamp is one interval plus the pause
+    after the last; the movement model's time does not advance during a
+    pause; speed is derived as distance over the time between timestamps;
+    and the validator limits how much that speed may change between
+    samples. One traced case agrees with this arithmetic. No fix has been
+    written or tried, so the explanation is untested.
+  - *Why the existing tests pass.* The two pause tests in the core pause for
+    an hour and for a day, which are among the lengths that pass.
+  - *What a fix needs.* Its own ticket. Tests over a range of pause lengths
+    on a fast mover, and a test that a real discontinuity (a teleport)
+    across a pause is still rejected, **before** any exemption from
+    validation is considered. Nothing has been exempted or loosened.
 
 ## Compatibility
-- All four crates: Verified on Windows 11 x86_64 / rustc 1.98.1 only.
+- All five crates: Verified on Windows 11 x86_64 / rustc 1.98.1
+  (`x86_64-pc-windows-msvc`) only.
+- The C interface: Verified from a C caller compiled by MSVC (DLL and
+  static library) and by MinGW gcc (DLL), debug and release, on that same
+  machine. Not built with the Rust GNU toolchain, not compiled as C++, not
+  run on any other system.
 - `locsim-health` is logic only (no files, clock, threads or platform
   calls), but it has still been built and run on Windows alone.
-- iOS Simulator, physical devices, jailbroken devices: Untested (no adapter yet).
+- macOS, Linux, iOS, the iOS Simulator, physical devices, jailbroken
+  devices, Rust 1.75: Untested. No adapter exists.
+- The detail is `Docs/COMPATIBILITY.md`.
 
 ## Next
-- T11 Platform adapter: the authorised iOS delivery/test adapter; document
-  platform limitations.
-- **T11 cannot be completed on the current machine.** It needs a Mac with
-  Xcode for anything Swift and for any run on the Simulator or a device.
-  What can be done on Windows is limited to a C ABI crate tested from Rust
-  and, possibly, a compile check for the iOS target. See
-  `Docs/PROJECT_CONTEXT/CURRENT_STATE.md`.
-- What T11 can build on: `Supervisor` is a `LocationProvider`, so the
-  adapter wraps one object; `next_deadline()` on the provider and the
-  supervisor say when to call next; `HealthReport.run` marks
-  discontinuities; `None` speed and course must become Core Location's `-1`.
+- **Review of T11A's documentation stage**, and its closure by the project
+  owner.
+- **T11B**, when a Mac with Xcode is available. Agreed areas: build and
+  link the crates for Apple targets; consume `locsim.h` from Swift; convert
+  a sample to a `CLLocation`; a driver that calls `poll` and `check` on a
+  real clock, with a decision about a suspended app; GPX that `simctl` and
+  Xcode accept; runs on the Simulator. Its design and its acceptance
+  criteria in detail are not written. It cannot be done, or partly done, on
+  the Windows machine used so far.
+- **The pause/resume defect** needs a ticket of its own (see "Known
+  Issues").
+- What T11B can build on: the header is the whole interface; a session is
+  driven by `locsim_session_next_deadline`, `locsim_session_poll` and
+  `locsim_session_check`; a change of `run` on a sample marks a
+  discontinuity; unknown speed and course are flagged, and must become Core
+  Location's `-1`, never `0`.
+- What T11B must not do: put simulation mathematics on the Swift side;
+  claim to replace the system's location (the scope is an app built with
+  the adapter); conceal anything or evade any check (C18); mark anything as
+  working on iOS that was not run there.
 - Gotchas:
   - Position and timestamp are authoritative; never emit speed/course from a
     model.
@@ -188,6 +325,10 @@ Findings during T10:
     checking that a particular suite catches a mutation, run that suite.
   - Derive expected numbers by hand. When a new test fails, decide whether
     the expectation or the code is wrong, and say which.
+  - `cargo test` does not run the C harness. After any change to
+    `locsim-ffi`, run `crates/locsim-ffi/harness/run.sh` as well.
+  - A test in `locsim-ffi` that creates a session takes the `shared()` or
+    `alone()` guard first.
 
 ## Working agreement
 - One ticket at a time; the specification is the contract.

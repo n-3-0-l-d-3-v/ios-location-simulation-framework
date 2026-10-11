@@ -18,7 +18,7 @@ the index of all context documents is
     Consistency Engine             speed/course from emitted fixes [implemented]
     Geographic Engine              WGS84 geodesics, ENU            [implemented]
     Location Abstraction           LocationProvider trait          [implemented]
-    Platform Adapter               C ABI + Swift → CLLocation
+    Platform Adapter               C ABI [implemented, separate crate] + Swift → CLLocation [planned, T11B]
     Health / Recovery              supervisor: watchdog, bounded restart, events [implemented, separate crate]
     Persistence / Storage          scenario + last-known record, digest, atomic replace [implemented, separate crate]
 
@@ -30,7 +30,8 @@ implemented).
 Dependency rule: a layer may import only layers below it plus `domain`/`rng`.
 The platform adapter contains conversion and lifecycle code only.
 `locsim-scenario` depends on the core; `locsim-store` depends on both;
-`locsim-health` depends on the core alone; the core depends on nothing.
+`locsim-health` depends on the core alone; `locsim-ffi` depends on the
+core, health and scenario crates; the core depends on nothing.
 
 ## Language and packaging
 
@@ -40,8 +41,8 @@ The platform adapter contains conversion and lifecycle code only.
 | Scenario documents | Rust crate `locsim-scenario`; depends on `locsim-core`, `serde` (no derive) and `serde_json` (`float_roundtrip`); `#![forbid(unsafe_code)]` | Keeps the core dependency-free while using a widely tested JSON reader and writer; see "Scenario documents" below |
 | Health | Rust crate `locsim-health`; depends on `locsim-core` only (and on `locsim-scenario` in its tests); `#![forbid(unsafe_code)]` | Supervision cannot alter an engine by construction; logic only, no files, clock or threads; see "Health supervision" below |
 | Persistence | Rust crate `locsim-store`; depends on `locsim-core` and `locsim-scenario`, nothing else; `#![forbid(unsafe_code)]` | The only crate that touches files; SHA-256 and atomic replacement written with the standard library; see "Persistence" below |
-| Platform boundary | C ABI crate (`locsim-ffi`, T11) | The only stable interface Swift/Obj-C can consume |
-| iOS adapter + demo app | Swift (T11/T12) | Core Location and UI are Apple-only APIs |
+| Platform boundary | Rust crate `locsim-ffi` with a C ABI and a hand-written header (T11A); depends on `locsim-core`, `locsim-health` and `locsim-scenario`, nothing else; the only crate with `unsafe` | The only stable interface Swift/Obj-C can consume; see "The C interface" below |
+| iOS adapter + demo app | Swift (T11B/T12), not started | Core Location and UI are Apple-only APIs |
 
 ## Implemented modules
 
@@ -79,12 +80,17 @@ dependency upgrade.
   `PlaybackParameters` — plain data with exhaustive validation that reports
   all errors at once, including mode-specific requirements and physically
   impossible configurations (orbit or route playback faster than `max_speed`).
-- `Timestamp` — integer nanoseconds, so `start + n × interval` is exact.
+- `Timestamp` — integer nanoseconds, so `start + n × interval` is exact. The
+  scale is the caller's and its origin is arbitrary: the code compares
+  timestamps and subtracts them, and never reads an absolute value. What
+  comes out is on the scale of what went in.
 - `HealthState`.
 
 ### `scheduler`
-- `Clock` trait with `SystemClock` (epoch captured once, advanced by a
-  monotonic timer) and `ManualClock` (tests).
+- `Clock` trait with `SystemClock` (the Unix time read once, then advanced
+  by a monotonic timer) and `ManualClock` (tests). Using the Unix epoch is
+  `SystemClock`'s choice; nothing else in the core depends on it, and
+  nothing in the provider or the supervisor uses a `Clock`.
 - `TickSchedule`: tick `n` is due at `start + n × interval`, recomputed from
   the origin on every poll, so wake-up lateness never accumulates. It is a
   pure state machine — it neither sleeps nor reads a clock; a driver polls it.
@@ -503,7 +509,9 @@ Design decisions worth knowing:
   from emitted positions → validate → emit (see "Pipeline order").
   Models are sampled at *simulated* time `start + tick index × interval`,
   which stands still while paused, so a mover resumes where it was instead
-  of leaping ahead.
+  of leaping ahead. **Open defect:** for some scenarios the sample after a
+  pause and a resume is rejected by the gate; see "Known Issues" in
+  `PROGRESS.md`.
   A sample is stamped with its tick's ideal time on the schedule
   (`schedule start + index × interval`; a `resume` moves the schedule start
   forward by the paused time), not with the time of the poll. As long as no
@@ -952,21 +960,164 @@ Not a checkpoint or resume. Not a timer, thread or real-time driver. Not a
 logger to any destination. Not aware of the store, the scenario format or
 any platform. It does not make a failing scenario work.
 
-## Platform delivery (planned, T11)
+## The C interface (`locsim-ffi`, T11A)
+
+A fifth crate. It gives a caller in another language one thing: a
+**supervised simulation session**, which is a `Supervisor<SimulationProvider>`
+built from a scenario document and a health policy. It adds nothing to what
+the supervisor does and computes nothing about positions. The contract a
+caller reads is the header, `crates/locsim-ffi/include/locsim.h`; what
+follows is how the crate keeps it.
+
+It is not a location provider for any platform. It makes no location appear
+anywhere. An adapter that calls it and hands samples to an app is T11B.
+
+### Functions
+
+| Function | What it does |
+|---|---|
+| `locsim_abi_version` | The version of the library, to compare with the header's |
+| `locsim_session_create`, `locsim_session_destroy` | Build a session from JSON and a policy; end it |
+| `locsim_session_start`, `_stop`, `_pause`, `_resume` | The supervisor's lifecycle calls |
+| `locsim_session_poll` | The sample due at a time, if any |
+| `locsim_session_next_deadline` | When to call next: the earlier of the next tick and a pending restart |
+| `locsim_session_check`, `locsim_session_health` | The health report, with and without passing the time on |
+| `locsim_session_report_fault`, `locsim_session_clear_fault` | A fault of another component, by its code |
+| `locsim_session_next_event`, `locsim_session_events_dropped` | The oldest waiting event; how many were discarded |
+
+Four structs cross, all `repr(C)` with no padding beyond named reserved
+bytes: the policy (64 bytes, in), a sample (88), a health report (192), an
+event (64). The header asserts each size, alignment and field offset, so a
+C compiler that disagrees does not compile it.
+
+### Handles and the registry
+
+A session is named by a 64-bit integer, `generation << 32 | slot + 1`; zero
+is never issued. A process-wide table maps a handle to the session's cell.
+Destroying a session empties its slot and advances the slot's generation,
+so a destroyed handle no longer matches, and a slot whose generation cannot
+advance is retired: no handle is issued twice. At most 1 024 sessions exist
+at once.
+
+### One call at a time, and no waiting
+
+Each session's cell is a mutex, taken only with `try_lock`. A call on a
+session that another call is using returns `LOCSIM_ERR_BUSY` at once and has
+done nothing. Three locks exist, taken in one order: the registry, a
+session, that session's event queue. Only the registry's is ever waited
+for, and whoever holds it does table work only.
+
+Destroy looks the handle up and tries the session's lock while holding the
+registry. If the session is in use it returns `LOCSIM_ERR_BUSY` and nothing
+changed. Otherwise it marks the cell closed, empties the slot, lets go of
+both locks, and only then releases the session. A call that found the cell
+before the destroy and locks it after finds it closed and returns
+`LOCSIM_ERR_INVALID_HANDLE`.
+
+### What a call checks, and what it writes
+
+Always in this order: null pointers; `struct_size`; the other arguments;
+the handle; the session's state; the operation. A call that does not return
+`LOCSIM_OK` writes nothing, except `create`, whose outputs per status are a
+table in the header. Where an output has a flag beside it and the flag is
+0, the output is not written.
+
+The library checks null, lengths, sizes, codes and UTF-8. It cannot check
+that a pointer which is not null points at valid memory; that is the
+caller's, and the header says so. Caller memory is read and written without
+assuming alignment, and the only reference made from a caller's pointer is
+to the bytes of the scenario document.
+
+### What crosses, and what does not
+
+- A sample: the supervisor's, with the number of its run added. Unknown
+  speed and course are a flag at 0 and a NaN; turning them into a platform's
+  "unknown" is the adapter's job.
+- An error: its kind, as a status code. Nothing it carried.
+- A health report: every field of `HealthReport`, with causes and faults as
+  bit sets (their order is lost).
+- An event: a record of integers. No text, no floating-point value.
+- A fault: one of three component codes. No text; the supervisor's detail
+  string is always empty.
+- Time: unchanged, as the caller gave it.
+
+The store is not exposed.
+
+### Events
+
+The session's supervisor reports to a sink that turns each event into a
+64-byte record and appends it to a queue with room for as many records as
+the session was created with (1 to 4 096). A record arriving at a full
+queue displaces the oldest, and a counter that never goes down is
+incremented. The caller takes records out one at a time. The supervisor's
+totals do not come from the queue and are unaffected by what it discards.
+
+### Panics
+
+Every exported function is wrapped so that a panic becomes
+`LOCSIM_ERR_PANIC`. A panic inside an operation is caught while the
+session's lock is still held: the session is taken out of its cell, the
+lock is let go, and the session is released on its own, with no lock held
+and no other panic unwinding. The handle then answers
+`LOCSIM_ERR_POISONED` until it is destroyed. A lock poisoned by a panic
+outside the operation is treated the same way by the next call that meets
+it. None of this holds in a build that aborts on panic; a second panic
+while a session is being released, stack exhaustion and allocation failure
+end the process.
+
+### How it is tested
+
+In Rust: every call of each test script is made on a session and on a
+supervisor built the same way, and after each call the status, sample,
+deadline, health and events must be equal. Collisions between threads and
+panics are forced at fixed points by hooks that exist only in the crate's
+unit-test build.
+
+From C: `harness/harness.c` includes the header and links the built
+library; `harness/run.sh` builds it with MSVC and MinGW gcc against the
+debug and release library, checks that the DLL exports exactly what the
+header declares, runs it, and compares its samples byte for byte with
+`examples/reference.rs`. **`cargo test` does not run this.** What it has
+been run on is in `COMPATIBILITY.md`: Windows x86_64 only.
+
+### What it is not
+
+Not an adapter, not a driver, not a timer. Nothing in it calls a session;
+`locsim_session_next_deadline` says when a caller should. Not a way to
+change the location other apps see.
+
+## Platform delivery (planned, T11B)
+
+Nothing here exists. It needs a Mac with Xcode.
+
+The adapter is to be a Swift layer over the C interface: it owns a
+session, calls `poll` and `check` on a timer and a clock it chooses,
+converts each sample to a `CLLocation`, and hands it to the app it is built
+into. It contains conversion and lifecycle only; the positions, speeds and
+courses are the core's.
 
 Mechanisms in scope:
-1. iOS Simulator: `xcrun simctl location` and GPX export.
-2. Development devices: GPX for Xcode's location simulation; in-app injection
-   through the framework's own `LocationProvider` for the app under development.
-3. Jailbroken research devices: to be designed only once hardware is available
-   to verify it; remains Untested until then.
+1. In-app injection through the C interface, for an app under development
+   that is built with the adapter. It affects that app only.
+2. iOS Simulator: `xcrun simctl location` and GPX export.
+3. Development devices: GPX for Xcode's location simulation.
+4. Jailbroken research devices: to be designed only once hardware is
+   available to verify it; remains Untested until then.
 
-Explicitly out of scope: concealing the framework or jailbreak, bypassing
+Explicitly out of scope: replacing the system's location for other apps as
+a goal of the framework, concealing the framework or a jailbreak, bypassing
 integrity checks, defeating third-party anti-spoofing.
 
 ## Privacy
 
 The core never reads the device's real location.
+
+Through the C interface (T11A) an event is a record of integers and a fault
+is a component code: there is no text for a position to be in, and a
+provider's error crosses as its code only. The one text the interface
+returns, the explanation of a refused scenario or policy, can repeat values
+of the document; it goes back to the caller who supplied the document and
+is not kept.
 
 The health supervisor's events (T10) contain no coordinate at any level and
 there is no event per sample: an event holds times, counts, states and the

@@ -5,12 +5,16 @@ and which tests would fail if it broke. Paths are relative to
 `crates/locsim-core/`. Test references are `file::test_function`.
 
 Paths in C19 are relative to `crates/locsim-scenario/`, in C20 to
-`crates/locsim-store/`, in C21 to `crates/locsim-health/`.
+`crates/locsim-store/`, in C21 to `crates/locsim-health/`, in C22 to
+`crates/locsim-ffi/`.
 
 References in C1–C18 were checked to exist at commit `1be8852` (2026-10-09);
 T08, T09 and T10 changed no file of `locsim-core`. References in C19 and C20
-were checked at `29c8342`, those in C21 at `fcda25c` (2026-10-10). If one no longer resolves, the code moved: find the
-new home before concluding the contract is gone.
+were checked at `29c8342`, those in C21 at `fcda25c` (2026-10-10), those in
+C22 at `e7fad44` (2026-10-11). T11A changed no behaviour of the four older
+crates; its documentation stage reworded one doc comment in `locsim-core`
+(`src/domain/time.rs`). If a reference no longer resolves, the code moved:
+find the new home before concluding the contract is gone.
 
 **If a change makes one of these tests fail, the default assumption is that
 the change is wrong, not the test.** A contract may be changed deliberately —
@@ -42,12 +46,23 @@ Nothing in the core sleeps or reads a clock. Tick `n` is due at
 the tick's ideal time, not the poll time. Overdue ticks are skipped and
 counted, never replayed. Timestamps are integer nanoseconds.
 
+**The time scale is the caller's** (decided 2026-10-11). A timestamp is a
+count of nanoseconds whose origin is arbitrary: the code compares
+timestamps and subtracts them and never reads their absolute value.
+Timestamps that come out (samples, deadlines, reports, events) are on the
+same scale as those that went in. A caller should not give a session a time
+earlier than one it has already given it; a time that cannot be represented
+is never produced. Nobody is required to use the Unix epoch. `SystemClock`
+does, by reading it once and advancing it with a monotonic timer; that is
+its implementation, not a rule for callers.
+
 - Enforced in: `src/scheduler/schedule.rs`, `src/domain/time.rs`,
   `src/provider/simulation.rs`.
 - Tests: `src/scheduler/schedule.rs::late_polls_do_not_accumulate_drift`,
   `src/scheduler/schedule.rs::overdue_slots_are_skipped_and_counted_not_replayed`,
   `src/scheduler/schedule.rs::pause_preserves_phase_and_counts_nothing_as_missed`,
-  `tests/fixed_pipeline.rs::six_simulated_hours_at_10_hz_stay_exact`.
+  `tests/fixed_pipeline.rs::six_simulated_hours_at_10_hz_stay_exact`. For
+  the time scale: `crates/locsim-ffi/src/ops/tests.rs::moving_every_time_by_a_constant_moves_the_timestamps_and_nothing_else`.
 
 ## C3. Models run on simulated time
 
@@ -496,3 +511,92 @@ relative to `crates/locsim-health/`.
   run; put a coordinate in an event; call a restart a resume; retry without
   a bound; treat an error as permanent or recoverable because of its text;
   weaken the gate so that a restarted run passes.
+
+## C22. The C interface: nothing undefined that can be defined, nothing changed on the way
+
+Added by T11A. The crate is `locsim-ffi`; the header is
+`include/locsim.h`. It is the only crate that contains `unsafe`.
+
+- **It exposes a supervised session and adds nothing to it.** A session is
+  a `Supervisor<SimulationProvider>`. Every status, sample, deadline, health
+  report and event that comes out is the supervisor's, made on the same
+  calls. No simulation mathematics, no clock, no file, no conversion of
+  times.
+- **The header is the contract and the library must match it.** Fifteen
+  functions; four structs whose size, alignment and field offsets the
+  header asserts; every constant. Any change is a new `LOCSIM_ABI_VERSION`.
+- **A handle is checked.** Zero, a handle never issued and a handle already
+  destroyed are `LOCSIM_ERR_INVALID_HANDLE`, from every function. No handle
+  is issued twice.
+- **No call waits for a session.** One in use is `LOCSIM_ERR_BUSY`, and the
+  refused call did nothing. That includes destroy, which then leaves the
+  handle valid. A call that found its session before it was destroyed does
+  nothing and says the handle is invalid. Lock order: registry, session,
+  event queue.
+- **Checks have one order**: null pointers, struct size, the other
+  arguments in order, the handle, the session's state, the operation.
+- **A call that does not return `LOCSIM_OK` writes nothing**, except
+  `create`, by the table in the header. With a flag at 0, the value beside
+  it is not written. An unknown speed or course is flag 0 and NaN.
+- **What can be checked is checked; what cannot is the caller's.** Null,
+  lengths, sizes, codes, UTF-8. A pointer that is not null and not valid is
+  undefined behaviour that the library does not detect; the header says so.
+  No reference with an alignment is made from a caller's pointer.
+- **A number from C is never taken for a value it does not name.** An
+  unknown component is refused. Numbers going out come from matches without
+  a wildcard, so a new variant in another crate does not compile until it
+  has a number.
+- **Only the kind of an error crosses.** Text exists only for a refused
+  scenario or policy, at most 4 096 bytes, returned to the caller.
+- **An event holds no text and no position; a fault has no text.** A record
+  is integers. The queue is bounded; a full one discards its oldest record
+  and counts it. Totals in the health report do not depend on the queue.
+- **A panic does not unwind into the caller**, and leaves no lock held. The
+  session is released with no lock held and no other panic unwinding; its
+  handle answers `LOCSIM_ERR_POISONED` until destroyed, and destroy
+  succeeds. This is not promised of a build that aborts on panic.
+- **Time is the caller's** (C2). The interface does no arithmetic on it.
+- **What was run is all that is claimed.** Windows x86_64; see
+  `Docs/COMPATIBILITY.md`. The C harness is `harness/run.sh`, and
+  `cargo test` does not run it.
+- Enforced in: `src/registry.rs` (`insert`, `close`, `get`),
+  `src/session.rs` (`create`, `locsim_session_create`,
+  `locsim_session_destroy`, `with_session`, `contain`, `release`),
+  `src/ops.rs`, `src/health.rs`, `src/events.rs` (`EventQueue`,
+  `LocsimEvent::of`), `src/codes.rs`, `include/locsim.h` (the assertions).
+- Tests (unit tests, in the files named):
+  `src/registry.rs::a_reused_slot_gets_a_new_handle_and_the_old_one_stays_invalid`,
+  `src/registry.rs::a_held_value_cannot_be_closed_and_its_handle_stays_valid`,
+  `src/registry.rs::a_slot_whose_generation_ran_out_is_retired`,
+  `src/session/tests.rs::a_null_pointer_is_refused_and_nothing_at_all_is_written`,
+  `src/session/tests.rs::several_faults_at_once_are_reported_in_the_documented_order`,
+  `src/session/tests.rs::the_text_is_copied_whole_or_not_at_all_and_its_length_is_always_reported`,
+  `src/session/tests.rs::destroy_is_busy_while_another_thread_holds_the_session_and_changes_nothing`,
+  `src/session/tests.rs::a_session_is_released_after_the_locks_and_outside_any_panic`,
+  `src/session/tests.rs::a_session_whose_release_panics_is_reported_and_its_handle_is_invalid`,
+  `src/ops/tests.rs::every_example_gives_the_same_samples_statuses_and_deadlines_as_the_supervisor`,
+  `src/ops/tests.rs::a_failing_run_is_reported_once_and_replaced_like_the_supervisor_does`,
+  `src/ops/tests.rs::health_and_events_follow_the_supervisor_through_faults_a_failure_and_a_stall`,
+  `src/ops/tests.rs::a_session_in_use_is_busy_for_every_other_call_and_none_of_them_waits`,
+  `src/ops/tests.rs::a_call_that_found_its_session_before_it_was_destroyed_does_nothing`,
+  `src/ops/tests.rs::a_panic_in_an_operation_poisons_the_session_and_releases_it_at_once`,
+  `src/ops/tests.rs::a_panic_outside_the_operation_poisons_the_lock_and_the_next_call_deals_with_it`,
+  `src/ops/tests.rs::a_panic_inside_the_event_sink_poisons_the_session_and_holds_no_lock`,
+  `src/ops/tests.rs::a_full_queue_keeps_the_newest_events_in_order_and_counts_what_it_dropped`,
+  `src/ops/tests.rs::no_event_and_no_report_holds_a_coordinate_that_was_emitted`,
+  `src/ops/tests.rs::a_component_that_does_not_exist_is_refused_before_the_handle_is_looked_at`,
+  `src/ops/tests.rs::a_failed_poll_writes_nothing`,
+  `src/codes.rs::every_provider_error_has_its_documented_number`,
+  `tests/header.rs::every_constant_has_the_same_number_on_both_sides_and_none_is_missing`.
+  From C: `harness/harness.c`, by `harness/run.sh`.
+- In the comparison tests, after every call, the session's status, sample,
+  deadline, health and events are required to equal the supervisor's. A new
+  operation that is not put through that comparison is not tested as this
+  contract says.
+- Do not: wait for a session's lock; hand out a pointer to a session; add a
+  callback into the caller; put text or a floating-point value in an event;
+  accept text with a fault; pass on an error's message; write an output of
+  a call that failed; change the header without changing the version; add
+  `unsafe` to another crate; add a clock, a file or a computation of
+  position to this crate; count a passing `cargo test` as a run of the C
+  harness; claim a platform the harness has not run on.

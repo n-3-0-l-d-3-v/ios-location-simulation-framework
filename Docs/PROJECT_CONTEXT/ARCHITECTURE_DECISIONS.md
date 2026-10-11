@@ -22,8 +22,10 @@ Stated in `crates/locsim-core/src/lib.rs`. A module may use modules to its
 left. `consistency` uses only `domain` and `geographic`; `validation` uses
 `consistency`; `provider` wires everything. `locsim-scenario` is a second
 crate on top of the core (D14), `locsim-store` a third on top of both
-(D16), and `locsim-health` a fourth on top of the core alone (D17). Platform code, when it exists,
-sits outside this crate and contains conversion and lifecycle only.
+(D16), `locsim-health` a fourth on top of the core alone (D17), and
+`locsim-ffi` a fifth on top of the core, health and scenario crates (D18):
+the C interface. Platform code, when it exists, sits outside these crates
+and contains conversion and lifecycle only.
 
 ## D1. The core is a dependency-free Rust crate (recorded, session)
 
@@ -243,17 +245,27 @@ sits outside this crate and contains conversion and lifecycle only.
   supervisor in `locsim-health` reports `Recovering` while a restart is
   pending and uses `HealthState`; see D17.
 
-## D13. Future platform adapter (planned; uncertain where noted)
+## D13. Platform adapter: a C interface, then Swift (part built in T11A; part planned)
 
-- **Decision (planned).** A C ABI crate (`locsim-ffi`) exposes the core; a
-  Swift adapter converts `SyntheticLocation` to `CLLocation` (`None` speed or
-  course become Core Location's `-1`). No simulation mathematics on the
-  platform side.
-- **Uncertain.** Whether a C ABI is the best boundary versus, for example,
-  UniFFI or swift-bridge has not been evaluated. Whether the core builds for
-  `aarch64-apple-ios` has not been tried. How delivery on a jailbroken
-  research device would work has deliberately not been designed, because no
-  hardware has been available to verify anything.
+- **Decided and built (T11A).** A C ABI crate, `locsim-ffi`, exposes one
+  thing: a *supervised simulation session*, a `Supervisor<SimulationProvider>`
+  built from a scenario document and a health policy. How is D18.
+- **Planned (T11B).** A Swift adapter calls that interface, converts each
+  sample to a `CLLocation` (unknown speed or course become Core Location's
+  `-1`) and owns the lifecycle of a session. **No simulation mathematics on
+  the platform side**: the Swift layer converts and schedules; it does not
+  compute positions, speeds or courses, and it does not duplicate anything
+  the core does.
+- **Scope.** In-app injection: an app built with the adapter receives
+  synthetic locations. Not a replacement of the system's location.
+- **Still uncertain.** Whether any crate builds for `aarch64-apple-ios` has
+  not been tried. How delivery on a jailbroken research device would work
+  has deliberately not been designed, because no hardware has been
+  available to verify anything.
+- **Corrected in T11A.** This entry used to say that the C ABI "exposes the
+  core", and that a hand-written C ABI had not been weighed against a
+  generator. It exposes the supervised session; and the comparison was made
+  (D18).
 - **Fixed regardless.** The scope boundaries in `PROJECT_BRIEF.md`.
 
 ## D14. Scenario JSON is a separate crate on `serde_json` (recorded, T08)
@@ -364,7 +376,7 @@ technical details (integrity, replacement) were resolved before coding.
   `MOVEFILE_WRITE_THROUGH` nor can sync a directory. So on Windows the
   rename is not confirmed durable, and that is stated, not hidden.
   **Not chosen:** an FFI call with write-through (`unsafe`, which every
-  crate here forbids) or a `windows-sys` dependency for one flag. Either is
+  crate forbade at the time, and which `locsim-store` still forbids) or a `windows-sys` dependency for one flag. Either is
   a contained follow-up if the guarantee is wanted.
 - **No backup generation, no lock file, no automatic cleanup.** A failed
   save already keeps the old record; a backup would only guard against a
@@ -433,11 +445,91 @@ an addendum, all before any code.
   would call the core's transition function; the implementation does not. A
   test checks that the two agree in every state.
 
+## D18. The C interface: what crosses, and how (recorded, T11A)
+
+Decided by the project owner on 2026-10-11 after a proposal, two revisions
+and a final delta, all before any code, and then stage by stage with a
+review after each.
+
+- **T11 is split.** T11A is the C interface, done where it can be tested
+  (Windows). T11B is everything that needs Apple tooling. T11 is complete
+  only with T11B. **Why.** The only machine has no Swift toolchain; waiting
+  would have left the boundary undesigned. **Rejected:** doing nothing until
+  a Mac exists; calling the Windows half "the adapter".
+- **A hand-written C ABI and a hand-written header; no dependency.** Fifteen
+  functions and four structs. **Rejected:** UniFFI or swift-bridge
+  (proc-macro dependencies, and generated Swift that could not be compiled
+  here); `cbindgen` (a dependency for a header of this size).
+- **`unsafe` in one crate.** `locsim-ffi` only, confined to reading and
+  writing through the caller's pointers, every block with its reason. The
+  other four crates still forbid it.
+- **A session is an integer handle, not a pointer.** `generation << 32 |
+  slot + 1`, in a registry. A handle that was destroyed or never issued is
+  an error the library reports, and no handle is issued twice. **Why.** The
+  ticket required double free and use after free to be tested; with a
+  pointer they are undefined behaviour and cannot be. **Cost.** One
+  process-wide table, and a limit of 1 024 sessions. **Rejected:** an opaque
+  pointer.
+- **No call waits for a session.** Each session has a mutex taken only with
+  `try_lock`; one in use is `LOCSIM_ERR_BUSY` and nothing happened. Lock
+  order: registry, session, event queue; only the registry's lock is ever
+  waited for, and nothing that holds it waits. **Rejected:** blocking (a
+  callback-free interface must not be able to stall a caller's thread);
+  "the caller serialises, or the behaviour is undefined".
+- **Destroy is refused, not deferred, while a session is in use.** It
+  returns `LOCSIM_ERR_BUSY` and the handle stays valid. A call that found
+  its session before a destroy and locks it afterwards finds it closed.
+- **Struct sizes are exact, and the version is one number.** A struct's
+  `struct_size` must equal its size; any change to the header is a new
+  `LOCSIM_ABI_VERSION`, compared for equality. **Why.** The header and the
+  library ship together and are linked into one binary; tolerating a size
+  mismatch would add a path nobody can exercise. **Rejected:** a
+  minimum-size rule with appended fields.
+- **A call that fails writes nothing.** The one exception is `create`, whose
+  outputs per status are a table in the header. An absent value has a flag;
+  an unknown speed or course is flagged and its number is NaN, so that a
+  caller who ignores the flag does not get a plausible zero (chosen in
+  stage 2 and reported then).
+- **Only the kind of an error crosses.** One status per `ProviderError`
+  variant and per `ScheduleError` variant; nothing an error carries. An
+  explanation in words exists in one place only: a refused scenario or
+  policy at `create`, returned to the caller who supplied it.
+- **Events are taken, not delivered.** A bounded queue of fixed-size
+  records of times, counts and codes; a full queue discards its oldest and
+  counts it. **Rejected:** a callback into the caller (re-entrancy, and a
+  second language's stack inside a Rust call); text (the `Display` of an
+  error can contain a coordinate the core refused).
+- **A fault has a component code and no text.** Three components: store,
+  adapter, delivery. **Why.** The supervisor takes a `&'static str`, which C
+  cannot supply; and free text from a caller would end the guarantee that
+  no event holds a position. **Rejected:** changing `locsim-health`.
+- **A panic stops at the boundary.** Every call is wrapped; a panic inside
+  an operation is caught with the session's lock held, the session is taken
+  out and released after the lock, and the handle answers
+  `LOCSIM_ERR_POISONED` until destroyed. Not promised: anything in a build
+  that aborts on panic, a second panic while a session is being released,
+  stack exhaustion, allocation failure.
+- **Time is the caller's.** A count of nanoseconds on a scale the caller
+  chooses; the origin is arbitrary; nothing is converted. Decided by the
+  project owner on 2026-10-11, reconciling three documents that disagreed
+  (D4, C2).
+- **Not exposed.** The store. The latest sample again (a caller keeps what
+  it was given). The text of an error.
+- **The C harness is a script, not a test.** `harness/run.sh` needs two C
+  compilers; making `cargo test` depend on them would need a build
+  dependency or a test that skips when one is missing, and a skipped test
+  passes. The script fails instead.
+- **Departure from the approved plan.** Panic handling and the thread tests
+  were planned as a stage of their own; each operation needed them to meet
+  its contract, so they were built with the operations (stages 1–3).
+
 ## Decisions a future ticket will have to make
 
-- T11: everything in D13; whether to split the ticket so that the Rust side
-  can be done without a Mac; where the one exception to `forbid(unsafe_code)`
-  lives; who calls `poll` and `check` and with which clock; how the run
-  number reaches the platform as a discontinuity.
+- T11B: who calls `poll` and `check`, on what timer, with which clock, and
+  what a suspended app means; how a sample's time becomes a
+  `CLLocation.timestamp`; how the crates are built and packaged for Apple
+  targets; whether GPX is written in Rust or in Swift; what a run on the
+  Simulator must show. Its acceptance criteria are not written.
+- Unowned: the pause/resume gate defect in the core (see `PROGRESS.md`).
 - Unowned: checkpoint/resume (D16); `MOVEFILE_WRITE_THROUGH` on Windows; a
   timer or driver; a bridge from `StoreError` to fault reports.

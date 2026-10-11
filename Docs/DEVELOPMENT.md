@@ -1,7 +1,9 @@
 # Development
 
 Requirements: Rust ≥ 1.75 (`rustup`), with `rustfmt` and `clippy`. No Apple
-tooling is needed for the simulation core.
+tooling is needed for the Rust crates. The C harness needs Windows with
+MSVC (Visual Studio's C++ tools) and MinGW-w64 gcc, and a POSIX shell (Git
+Bash or MSYS2).
 
 | Task | Command |
 |---|---|
@@ -10,6 +12,7 @@ tooling is needed for the simulation core.
 | Property tests only | `cargo test -p locsim-core --test geographic_props` |
 | Lint | `./Scripts/lint.sh` |
 | Pre-commit gate | `./Scripts/validate.sh` |
+| C harness (not part of the gate above) | `crates/locsim-ffi/harness/run.sh` (both compilers), or `... run.sh msvc`, `... run.sh mingw` |
 
 ## Conventions
 
@@ -21,6 +24,18 @@ tooling is needed for the simulation core.
   any crate without a written justification in that crate's `Cargo.toml`
   (`locsim-scenario` carries one for `serde` and `serde_json`). Randomness
   comes only from `rng::Rng` (seeded).
+- The C interface (`crates/locsim-ffi`): `unsafe` is allowed in this crate
+  only, each block with a `SAFETY` comment (Clippy enforces it). A test that
+  creates a session first takes the `shared()` guard, or `alone()` if it
+  needs to know what the registry holds; both destroy what the test created
+  when they are dropped. **`cargo test` does not run the C harness**: after
+  any change to the crate or to `include/locsim.h`, run
+  `harness/run.sh` too. It builds the library in debug and release, checks
+  that the DLL exports exactly what the header declares, compiles
+  `harness/harness.c` with each compiler, runs it, and compares its samples
+  with `examples/reference.rs`. It fails if a compiler is missing. Any
+  change to the header needs a new `LOCSIM_ABI_VERSION`, and
+  `tests/header.rs` lists every constant.
 - Health: `cargo test -p locsim-health -- --nocapture` prints the measured
   figures. `tests/support/mod.rs` has a provider that follows a script, a
   real provider made to fail through `ModelFactory`, and two checks

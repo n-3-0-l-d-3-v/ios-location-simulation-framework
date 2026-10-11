@@ -1,4 +1,4 @@
-# Ticket history: T00–T10
+# Ticket history: T00–T10, and T11A
 
 What each completed ticket was for, what it built, what it decided, how it
 was tested, what it left open, and which commits it consists of.
@@ -10,7 +10,8 @@ How to read the evidence:
 - **Test counts at the close of each ticket** are *reported*: taken from
   `PROGRESS.md` as written at the time, not re-run at those commits. Only the
   final count (273 at `1be8852`) was re-run when this file was written. The
-  T08, T09 and T10 counts were observed in the session that did the work.
+  T08, T09, T10 and T11A counts were observed in the session that did the
+  work.
 - **Statistics** (pairs re-checked, closest approach to a limit, and so on)
   are *reported* from test output. They are printed by the tests themselves
   and can be reproduced with `cargo test -- --nocapture`.
@@ -365,6 +366,91 @@ the audit were corrected (commits `bb2a354`, `0b603cd`).
   reports, reconciliation, privacy), `fcda25c` (legality agrees with the
   core table), then the documentation commit that closed the ticket.
 
+## T11A — The C interface (first part of T11, Platform adapter)
+
+**Not closed.** Its implementation stages were each reviewed and approved;
+its documentation stage awaits review. T11 as a whole is open: T11B, the
+Apple side, has not started.
+
+- **Purpose.** Give a platform adapter something to call: one supervised
+  simulation session behind a C ABI, with a header a C or Swift compiler can
+  read, proved by a C program and not only by Rust tests.
+- **How it was run.** An inspection of the repository; a design; two
+  revisions and a final delta in review; then five stages, each stopped for
+  review, and a bounded investigation between the second and third.
+- **Decided by the project owner.** The split into T11A and T11B. A
+  hand-written C ABI. Integer handles. `try_lock` and `LOCSIM_ERR_BUSY`. A
+  pull queue of events. Faults without text. The caller-chosen time scale.
+  That the pause/resume defect is a separate core issue and must not be
+  worked around here.
+- **Changed by the review, before coding.** Destroy made to refuse, not
+  defer, while a session is in use, with a stated lock order. The pointer
+  contract written out function by function. Exact struct sizes chosen
+  deliberately over appendable ones. Events reduced from text to integers
+  once it was found that an error's text can hold a coordinate. Fault
+  detail removed. Two convenience functions removed. The output rules for
+  `create` made a table instead of a blanket rule with an exception.
+- **Built.** `crates/locsim-ffi`: `registry`, `session`, `ops`, `health`,
+  `events`, `codes`, `status`; `include/locsim.h`; `harness/harness.c` and
+  `harness/run.sh`; `examples/reference.rs`; `tests/header.rs`.
+- **Key decisions.** D18. Contract C22. D13 corrected. C2 extended with the
+  time scale.
+- **Changed existing behaviour.** None. One doc comment in `locsim-core`
+  (`Timestamp`) was reworded in the documentation stage, with permission.
+- **Found.**
+  - Pausing and resuming `antimeridian_loop.json` or `driving.json` makes
+    the gate reject a sample: the first natural pipeline failure in the
+    suite, and an open defect of the core (`PROGRESS.md`). It surfaced
+    because a comparison script paused a moving scenario for 2.2 s; the
+    core's own pause tests pause for an hour and a day.
+  - `CoordinateError` carries the value it refused, so "no event carries a
+    position" was true of emitted positions only.
+  - Three documents described the time scale three ways.
+- **Mistakes in the design, caught in review.** A destroy that could race a
+  call without stated semantics. A blanket "nothing is written on failure"
+  that `create` contradicted. Arbitrary caller text beside a claim that
+  events hold no coordinates.
+- **Mistakes in the implementation or tests.**
+  - Stage 1's destroy ran the session's destructors while a test's panic
+    was unwinding, in one catch, where the design had two; the status was
+    right and the path was wrong. Found in review; fixed, with a test that
+    records the conditions a session is released under (`b890ddf`).
+  - A stage-1 report claimed the DLL exported "exactly" three functions on
+    the evidence of a filtered listing. Re-checked unfiltered.
+  - A patch script applied half of its edits before failing; the remainder
+    was applied after reading what was on disk.
+  - The first C harness run hung when the header was deliberately made
+    wrong: one loop had no practical bound. Bounded.
+  - Wrong expectations, corrected by derivation: sample counts; that every
+    example survives a pause; the number of refused calls in a lifecycle
+    walk; that a session polled by two threads stays healthy.
+  - A failed test left sessions registered and broke others; the test
+    guards now clean up (`b34801d`).
+- **Tests at the last code commit (observed 2026-10-11, `e7fad44`).** 594 in
+  the workspace: the 516 of T10 unchanged, and 78 in `locsim-ffi` (75 unit,
+  3 header). The C harness: six configurations on Windows x86_64 (MSVC
+  19.44 against the DLL and the static library, MinGW-w64 gcc 14.2 against
+  the DLL; debug and release), about 385 000 checks each, exit 0, samples
+  equal to the Rust reference. 29 mutation checks, four of them against the
+  C harness.
+- **Left open.**
+  - Everything Apple: T11B.
+  - The pause/resume defect.
+  - No timer or driver.
+  - Nothing run off Windows; the library not built with a GNU Rust
+    toolchain; the header not compiled as C++; Rust 1.75 unbuilt.
+  - Collisions between threads and the panic paths are forced only in Rust
+    tests, not from C.
+  - Miri not run.
+  - The C harness is not part of `cargo test`.
+- **Commits.** `e60a1b5` (crate, registry, status codes, create, destroy),
+  `b890ddf` (release in its own catch), `6b315f9` (lifecycle, poll, next
+  deadline, sample, error codes), `b34801d` (test cleanup; failing runs and
+  shifted times tested without the core defect), `fc5760a` (health, faults,
+  event queue), `e7fad44` (header, C harness, reference, header test),
+  `5b3dd7f` (the defect recorded in `PROGRESS.md`), then the documentation
+  commit of its last stage.
+
 ## Recurring lessons
 
 - Strict comparisons plus independent arithmetic expose every rounding
@@ -394,3 +480,14 @@ the audit were corrected (commits `bb2a354`, `0b603cd`).
   wrong, and say which it was.
 - A parameter's documentation is a contract too: T04's `max_offset_rate_mps`
   said one thing and did a weaker one for three tickets.
+- A test that compares two implementations step by step finds what neither
+  was written to look for. T11A's comparison scripts found a core defect in
+  code no stage had touched.
+- "Exactly" needs an unfiltered look. A listing filtered to what you expect
+  cannot show what you did not.
+- A returned status that is right does not make the path right. Record the
+  conditions a thing happened under, and assert them.
+- A passing Rust suite says nothing about a C caller. The header was
+  believed only after a C compiler had read it and a C program had run.
+- A harness is tested like a test: make the header wrong, make the library
+  wrong, and see it fail, and see that it ends.

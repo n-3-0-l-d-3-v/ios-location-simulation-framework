@@ -6,9 +6,11 @@ the session to work out the next ticket from the repository rather than
 assuming one. The only line you may want to edit is the optional
 "Ticket override" at the end.
 
-As of 2026-10-10 the ticket a fresh session is expected to arrive at is
-**T11 — Platform adapter**. That ticket needs a Mac with Xcode for anything
-beyond a Rust-side C ABI; see `CURRENT_STATE.md`, "Before starting T11".
+As of 2026-10-11 the ticket a fresh session is expected to arrive at is
+**T11 — Platform adapter**, which is open and in two parts: T11A (the C
+interface, implemented on Windows and awaiting its closing review) and T11B
+(the Apple side, not started). T11B needs a Mac with Xcode; see
+`CURRENT_STATE.md`, "What T11B needs, and what it can build on".
 
 ---
 
@@ -23,7 +25,8 @@ sure it is up to date with origin/main). Otherwise clone the repository.
 
 The project is a synthetic location simulation framework for authorised
 privacy testing, application development and controlled research: a Rust
-simulation core, with an iOS platform adapter planned for a later ticket.
+simulation core and a C interface to it, with the Apple side of an iOS
+platform adapter planned for a later ticket.
 
 == Step 1: read the context, in this order ==
 
@@ -169,5 +172,5 @@ Ticket override (optional — leave blank to use the first unfinished ticket):
   for files as it needs them.
 - A session that starts coding before giving you the step 5 summary has not
   followed the prompt. Stop it and ask for the summary.
-- Tickets T11 and T12 need a Mac with Xcode. A session on another machine
+- Tickets T11B and T12 need a Mac with Xcode. A session on another machine
   should say so rather than produce untested Swift.
