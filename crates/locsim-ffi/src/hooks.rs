@@ -20,6 +20,9 @@ pub(crate) enum Point {
     /// With a session's lock held but outside the operation, where only
     /// the catch around the whole call is left.
     HoldingLock,
+    /// Inside the session's event sink, with the queue locked: that is,
+    /// inside whatever supervisor call was reporting the event.
+    EventRecord,
 }
 
 /// A place where a test can hold a call still while it does something else.

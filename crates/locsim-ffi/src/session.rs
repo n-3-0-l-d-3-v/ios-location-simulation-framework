@@ -21,10 +21,11 @@
 //! of the parameter list, then the content (UTF-8, the scenario, the
 //! policy), then the session limit.
 
+use crate::events::{EventQueue, QueueSink};
 use crate::registry::{self, CloseError, Registry};
 use crate::status::*;
 use locsim_core::provider::SimulationProvider;
-use locsim_health::{HealthPolicy, NullSink, Supervisor};
+use locsim_health::{HealthPolicy, Supervisor};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
@@ -79,6 +80,9 @@ impl LocsimPolicy {
 
 pub(crate) struct Session {
     pub(crate) supervisor: Supervisor<SimulationProvider>,
+    /// What the supervisor's sink fills. Locked only by the call that
+    /// holds the session, after the session: registry, session, queue.
+    pub(crate) events: Arc<Mutex<EventQueue>>,
 }
 
 /// What a handle's cell holds.
@@ -286,18 +290,20 @@ unsafe fn create(
 
     // SAFETY: as for `struct_size`; every bit pattern is a `LocsimPolicy`.
     let policy = unsafe { policy.read_unaligned() }.to_health();
-    // Events are discarded for now: the queue comes with the functions that
-    // read it. `event_capacity` is checked and not yet used.
+    // At most `LOCSIM_EVENT_CAPACITY_MAX`, checked above.
+    let capacity = usize::try_from(event_capacity).unwrap_or(usize::MAX);
+    let events = Arc::new(Mutex::new(EventQueue::new(capacity)));
     let supervisor = Supervisor::for_simulation(
         SimulationProvider::new(scenario),
         policy,
-        Box::new(NullSink),
+        Box::new(QueueSink(events.clone())),
     )
     .map_err(|errors| explain(LOCSIM_ERR_POLICY, &errors))?;
 
     // Built before the registry is locked, and, if refused, dropped after
     // it is released: nothing but table work happens under that lock.
-    let cell = Arc::new(Mutex::new(State::Open(Box::new(Session { supervisor }))));
+    let session = Session { supervisor, events };
+    let cell = Arc::new(Mutex::new(State::Open(Box::new(session))));
     let issued = registry().insert(cell);
     #[cfg(test)]
     if let Ok(session) = issued {
@@ -306,11 +312,18 @@ unsafe fn create(
     issued.map_err(|_refused| LOCSIM_ERR_LIMIT.into())
 }
 
-/// A session around a supervisor a test built itself, for what a scenario
-/// document cannot describe: a movement model that misbehaves.
+/// A session around a supervisor a test builds itself, given the sink it
+/// must report to: for what a scenario document cannot describe, such as a
+/// movement model that misbehaves.
 #[cfg(test)]
-pub(crate) fn adopt(supervisor: Supervisor<SimulationProvider>) -> LocsimSession {
-    let cell = Arc::new(Mutex::new(State::Open(Box::new(Session { supervisor }))));
+pub(crate) fn adopt(
+    event_capacity: usize,
+    build: impl FnOnce(Box<dyn locsim_health::EventSink + Send>) -> Supervisor<SimulationProvider>,
+) -> LocsimSession {
+    let events = Arc::new(Mutex::new(EventQueue::new(event_capacity)));
+    let supervisor = build(Box::new(QueueSink(events.clone())));
+    let session = Session { supervisor, events };
+    let cell = Arc::new(Mutex::new(State::Open(Box::new(session))));
     let issued = registry().insert(cell);
     let session = issued.ok().expect("room for one more session");
     crate::testing::made(session);
