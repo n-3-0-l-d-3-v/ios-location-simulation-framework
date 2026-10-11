@@ -93,6 +93,21 @@ pub(crate) enum State {
     Closed,
 }
 
+// In this crate's tests a session's destructor reports the conditions it
+// runs under and can be made to panic: the only way to exercise a session
+// whose release fails.
+#[cfg(test)]
+impl Drop for Session {
+    fn drop(&mut self) {
+        use std::sync::TryLockError;
+        crate::hooks::note_session_drop(crate::hooks::DropConditions {
+            during_a_panic: std::thread::panicking(),
+            registry_locked: matches!(REGISTRY.try_lock(), Err(TryLockError::WouldBlock)),
+        });
+        crate::hooks::fire(crate::hooks::Point::SessionDrop);
+    }
+}
+
 // A session is handed between the threads that call the library.
 const _: fn() = || {
     fn sendable<T: Send>() {}
@@ -294,27 +309,40 @@ pub unsafe extern "C" fn locsim_session_create(
 /// - `LOCSIM_ERR_BUSY`: another call is using the session. Nothing was
 ///   done and the handle is still valid; destroy it again later.
 /// - `LOCSIM_ERR_PANIC`: the handle was invalidated, and releasing the
-///   session then panicked. Whatever was not released is leaked.
+///   session then panicked. Destroying it again is harmless and returns
+///   `LOCSIM_ERR_INVALID_HANDLE`.
+///
+/// What a panic while releasing can and cannot mean. The session is
+/// released on its own, after every lock has been let go and with no other
+/// panic in flight, so one panicking destructor is caught and reported.
+/// The language then releases the rest of the session while that panic
+/// unwinds; a second panic there ends the process, as does any panic in a
+/// build that aborts instead of unwinding. Neither can be caught here.
 #[no_mangle]
 pub extern "C" fn locsim_session_destroy(session: LocsimSession) -> LocsimStatus {
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        let closed = registry().close(session, State::Closed);
-        match closed {
-            Err(CloseError::Invalid) => LOCSIM_ERR_INVALID_HANDLE,
-            Err(CloseError::Busy) => LOCSIM_ERR_BUSY,
-            Ok(state) => {
-                #[cfg(test)]
-                crate::hooks::fire(crate::hooks::Point::DestroyDrop);
-                // The session's own destructors run here, with no lock held.
-                drop(state);
-                LOCSIM_OK
-            }
-        }
+    // First the table, and nothing else: the handle is invalidated and both
+    // locks are released before the session itself is touched.
+    let closed = catch_unwind(AssertUnwindSafe(|| {
+        registry().close(session, State::Closed)
     }));
-    outcome.unwrap_or_else(|payload| {
-        std::mem::forget(payload);
-        LOCSIM_ERR_PANIC
-    })
+    let state = match closed {
+        Ok(Ok(state)) => state,
+        Ok(Err(CloseError::Invalid)) => return LOCSIM_ERR_INVALID_HANDLE,
+        Ok(Err(CloseError::Busy)) => return LOCSIM_ERR_BUSY,
+        Err(payload) => {
+            // Not reachable by any path known: closing does table work only.
+            std::mem::forget(payload);
+            return LOCSIM_ERR_PANIC;
+        }
+    };
+    // Then the session's own destructors, caught separately.
+    match catch_unwind(AssertUnwindSafe(move || drop(state))) {
+        Ok(()) => LOCSIM_OK,
+        Err(payload) => {
+            std::mem::forget(payload);
+            LOCSIM_ERR_PANIC
+        }
+    }
 }
 
 #[cfg(test)]

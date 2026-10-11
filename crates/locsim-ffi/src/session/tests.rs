@@ -1,5 +1,5 @@
 use super::*;
-use crate::hooks::{arm, Point};
+use crate::hooks::{arm, take_session_drop, DropConditions, Point};
 use crate::{locsim_abi_version, LOCSIM_ABI_VERSION};
 use std::ptr::{null, null_mut};
 use std::sync::mpsc;
@@ -660,18 +660,60 @@ fn a_panic_during_creation_is_reported_and_the_outputs_are_zeroed() {
     assert_eq!(locsim_session_destroy(handle), LOCSIM_OK);
 }
 
+/// What must hold whenever a session is released: no lock is held and no
+/// other panic is unwinding.
+const RELEASED_ALONE: DropConditions = DropConditions {
+    during_a_panic: false,
+    registry_locked: false,
+};
+
 #[test]
-fn a_panic_while_releasing_a_session_leaves_its_handle_invalid() {
-    let _guard = shared();
+fn a_session_is_released_after_the_locks_and_outside_any_panic() {
+    // Alone, so that no other test can be holding the registry.
+    let _guard = alone();
+    let handle = open();
+    take_session_drop();
+    assert_eq!(locsim_session_destroy(handle), LOCSIM_OK);
+    assert_eq!(take_session_drop(), Some(RELEASED_ALONE));
+    // A refused destroy releases nothing.
+    assert_eq!(locsim_session_destroy(handle), LOCSIM_ERR_INVALID_HANDLE);
+    assert_eq!(take_session_drop(), None);
+}
+
+#[test]
+fn a_session_whose_release_panics_is_reported_and_its_handle_is_invalid() {
+    let _guard = alone();
     let handle = open();
     let other = open();
-    arm(Point::DestroyDrop);
+    let before = live();
+    take_session_drop();
+    arm(Point::SessionDrop);
     assert_eq!(locsim_session_destroy(handle), LOCSIM_ERR_PANIC);
+    // The destructor that panicked was the first panic, not one met while
+    // unwinding from another, and it ran with the registry released.
+    assert_eq!(take_session_drop(), Some(RELEASED_ALONE));
+    // The handle was invalidated before the release was attempted.
+    assert_eq!(live(), before - 1);
     assert!(registry().get(handle).is_none());
     assert_eq!(locsim_session_destroy(handle), LOCSIM_ERR_INVALID_HANDLE);
-    // Other sessions are not affected.
-    assert!(registry().get(other).is_some());
+    // Nothing is poisoned and other sessions are not affected.
+    assert!(registry()
+        .get(other)
+        .is_some_and(|cell| !cell.is_poisoned()));
     assert_eq!(locsim_session_destroy(other), LOCSIM_OK);
+    assert_eq!(take_session_drop(), Some(RELEASED_ALONE));
+}
+
+#[test]
+fn a_session_refused_at_the_limit_is_released_after_the_registry() {
+    let _guard = alone();
+    let handles: Vec<u64> = (0..LOCSIM_SESSION_LIMIT).map(|_| open()).collect();
+    take_session_drop();
+    assert_eq!(create(FIXED.as_bytes(), &policy()).status, LOCSIM_ERR_LIMIT);
+    assert_eq!(take_session_drop(), Some(RELEASED_ALONE));
+    for handle in handles {
+        assert_eq!(locsim_session_destroy(handle), LOCSIM_OK);
+    }
 }
 
 #[test]
