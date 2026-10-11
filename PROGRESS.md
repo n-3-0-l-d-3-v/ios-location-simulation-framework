@@ -142,6 +142,20 @@ Findings during T10:
   uses; raw GPS logs are usually not admissible as routes; no real-time
   driver; nothing has run on iOS.
 
+- **Open defect in the core, found during T11A and not fixed there:
+  pausing and resuming a moving scenario can make the next sample fail the
+  gate.** After a resume the world has stood still while the timestamps
+  moved on, so the derived speed (distance over elapsed time) drops, and the
+  validator's speed-change stage rejects the first sample after the resume
+  (`DecelerationExceeded`) or the one after it (`AccelerationExceeded`).
+  Seen on `antimeridian_loop.json` and `driving.json` for pauses from about
+  10 ms to about 10 s; very short and very long pauses pass, as do slow or
+  noisy scenarios, which is why the two existing pause tests (an hour, a
+  day) pass. The supervisor then replaces the run. Not caused by and not
+  changed by `locsim-ffi`. It needs its own ticket: any fix must come with
+  tests over a range of pause lengths and a test that a real teleport
+  across a pause is still rejected.
+
 ## Compatibility
 - All four crates: Verified on Windows 11 x86_64 / rustc 1.98.1 only.
 - `locsim-health` is logic only (no files, clock, threads or platform
