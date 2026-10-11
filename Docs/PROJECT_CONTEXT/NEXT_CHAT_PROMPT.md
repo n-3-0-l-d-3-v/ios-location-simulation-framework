@@ -8,8 +8,9 @@ assuming one. The only line you may want to edit is the optional
 
 As of 2026-10-11 the ticket a fresh session is expected to arrive at is
 **T11 — Platform adapter**, which is open and in two parts: T11A (the C
-interface, implemented on Windows and awaiting its closing review) and T11B
-(the Apple side, not started). T11B needs a Mac with Xcode; see
+interface, closed on 2026-10-11, validated on Windows only) and T11B (the
+Apple side, not started and not authorised: its prerequisites need the
+owner's decisions first). T11B needs a Mac with Xcode; see
 `CURRENT_STATE.md`, "What T11B needs, and what it can build on".
 
 ---
