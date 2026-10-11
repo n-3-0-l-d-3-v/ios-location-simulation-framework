@@ -368,9 +368,13 @@ the audit were corrected (commits `bb2a354`, `0b603cd`).
 
 ## T11A — The C interface (first part of T11, Platform adapter)
 
-**Not closed.** Its implementation stages were each reviewed and approved;
-its documentation stage awaits review. T11 as a whole is open: T11B, the
-Apple side, has not started.
+**Closed by the project owner on 2026-10-11**, at commit `74c6c16`, after a
+review of each implementation stage and of the documentation stage. What
+was closed is what was run: a C interface validated on Windows x86_64 in
+the configurations listed in `Docs/COMPATIBILITY.md`, with the limitations
+under "Left open" below. Closing it claims nothing about any other
+platform. **T11 as a whole stays open**: T11B, the Apple side, has not
+started and has not been authorised.
 
 - **Purpose.** Give a platform adapter something to call: one supervised
   simulation session behind a C ABI, with a header a C or Swift compiler can
@@ -449,7 +453,9 @@ Apple side, has not started.
   shifted times tested without the core defect), `fc5760a` (health, faults,
   event queue), `e7fad44` (header, C harness, reference, header test),
   `5b3dd7f` (the defect recorded in `PROGRESS.md`), then the documentation
-  commit of its last stage.
+  stage: `f3cea23` (two doc comments), `fe97109` (the project records, D18,
+  C22), `74c6c16` (acceptance criteria of T11A and T11B); then the commits
+  that recorded the closure.
 
 ## Recurring lessons
 
