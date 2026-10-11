@@ -1,4 +1,9 @@
-/// Nanoseconds since the Unix epoch.
+/// A count of nanoseconds on a time scale the caller chooses.
+///
+/// Where the count starts is arbitrary: the core only compares timestamps
+/// and subtracts them, and every sample carries a time on the same scale as
+/// the times it was given. A caller is not required to use the Unix epoch;
+/// [`crate::scheduler::SystemClock`] does, and that is its own choice.
 ///
 /// Integer time keeps tick arithmetic (`start + n × interval`) exact and
 /// makes seeded runs bit-reproducible.

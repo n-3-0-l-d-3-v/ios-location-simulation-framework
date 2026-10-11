@@ -14,10 +14,12 @@
 //! any location appear anywhere. It is the boundary a platform adapter can
 //! call. It reads no clock and no file.
 //!
-//! Present so far (T11A, stage 3): creating and destroying a session, its
-//! lifecycle, polling it for samples, asking when to call next, its health,
-//! reporting the faults of other components, and reading its events. There
-//! is no C header yet, and nothing has been called from C.
+//! What there is: creating and destroying a session, its lifecycle, polling
+//! it for samples, asking when to call next, its health, reporting the
+//! faults of other components, and reading its events. The C side of it is
+//! `include/locsim.h`. `harness/run.sh` compiles a C program against that
+//! header, links it to the built library and runs it; `cargo test` does
+//! not. Built and run on Windows x86_64 only.
 //!
 //! This is the only crate of the workspace that contains `unsafe`. It is
 //! confined to reading and writing through the caller's pointers.
