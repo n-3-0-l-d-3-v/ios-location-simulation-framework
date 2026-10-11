@@ -1,0 +1,19 @@
+[package]
+name = "locsim-ffi"
+description = "C ABI over a supervised locsim simulation session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# `rlib` for this crate's own tests, `cdylib` for a C consumer on a desktop
+# host, `staticlib` for a consumer that links the library into its binary.
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+# Nothing outside the workspace. This is the one crate that may contain
+# `unsafe`: the other crates forbid it and are not changed.
+[dependencies]
+locsim-core = { path = "../locsim-core" }
+locsim-health = { path = "../locsim-health" }
+locsim-scenario = { path = "../locsim-scenario" }

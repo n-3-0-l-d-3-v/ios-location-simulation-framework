@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/locsim-core",
+    "crates/locsim-ffi",
     "crates/locsim-health",
     "crates/locsim-scenario",
     "crates/locsim-store",
