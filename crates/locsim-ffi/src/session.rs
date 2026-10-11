@@ -299,7 +299,22 @@ unsafe fn create(
     // it is released: nothing but table work happens under that lock.
     let cell = Arc::new(Mutex::new(State::Open(Box::new(Session { supervisor }))));
     let issued = registry().insert(cell);
+    #[cfg(test)]
+    if let Ok(session) = issued {
+        crate::testing::made(session);
+    }
     issued.map_err(|_refused| LOCSIM_ERR_LIMIT.into())
+}
+
+/// A session around a supervisor a test built itself, for what a scenario
+/// document cannot describe: a movement model that misbehaves.
+#[cfg(test)]
+pub(crate) fn adopt(supervisor: Supervisor<SimulationProvider>) -> LocsimSession {
+    let cell = Arc::new(Mutex::new(State::Open(Box::new(Session { supervisor }))));
+    let issued = registry().insert(cell);
+    let session = issued.ok().expect("room for one more session");
+    crate::testing::made(session);
+    session
 }
 
 /// Builds a session from a scenario document and a health policy. The

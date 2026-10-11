@@ -1,11 +1,13 @@
 use super::*;
 use crate::hooks::{arm, gate, take_session_drop, Point, Stop};
-use crate::session::{locsim_session_destroy, registry};
+use crate::session::{adopt, locsim_session_destroy, registry};
 use crate::testing::*;
-use locsim_core::domain::{LocationSource, SimulationState};
+use locsim_core::domain::{LocationSource, Scenario, SimulationState};
+use locsim_core::movement::{model_for, MovementError, MovementModel, MovementSample};
 use locsim_core::scheduler::ScheduleError;
 use locsim_health::NullSink;
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 const SECOND: i64 = 1_000_000_000;
 const MS: i64 = 1_000_000;
@@ -271,23 +273,34 @@ fn script(origin: i64) -> Vec<Step> {
 /// expect to have been exercised.
 #[derive(Default)]
 struct Seen {
-    samples: usize,
+    samples: Vec<LocsimSample>,
     runs: Vec<u64>,
     statuses: Vec<LocsimStatus>,
-    deadlines: usize,
+    /// The deadline after each step.
+    deadlines: Vec<Option<i64>>,
     /// The step and the supervisor's error of every poll that failed.
     failed_polls: Vec<(usize, ProviderError)>,
 }
 
-/// Makes every call of the script on a session and on a supervisor, and
-/// requires the same answer from both after each one.
+/// Makes every call of the script on a session made from `json` and on a
+/// supervisor made from it, and requires the same answer from both.
 fn run_side_by_side(json: &str, origin: i64) -> Seen {
-    let session = open_with(json);
-    let mut direct = reference(json);
+    let label = format!("from {origin}");
+    compare(open_with(json), reference(json), script(origin), &label)
+}
+
+/// Makes every step on `session` and on `direct`, which must have been
+/// built alike, and requires the same answer from both after each one.
+fn compare(
+    session: u64,
+    mut direct: Supervisor<SimulationProvider>,
+    steps: Vec<Step>,
+    label: &str,
+) -> Seen {
     let mut seen = Seen::default();
 
-    for (n, step) in script(origin).into_iter().enumerate() {
-        let at = format!("step {n} {step:?} from {origin}");
+    for (n, step) in steps.into_iter().enumerate() {
+        let at = format!("step {n} {step:?} {label}");
         let status = match step {
             Step::Start(now) => {
                 let expected = direct.start(Timestamp::from_nanos(now));
@@ -327,7 +340,7 @@ fn run_side_by_side(json: &str, origin: i64) -> Seen {
                         let got = polled.sample().expect(&at);
                         let run = direct.health().run;
                         assert_same_sample(&got, &expected, run, &at);
-                        seen.samples += 1;
+                        seen.samples.push(got);
                         if seen.runs.last() != Some(&run) {
                             seen.runs.push(run);
                         }
@@ -346,7 +359,7 @@ fn run_side_by_side(json: &str, origin: i64) -> Seen {
         };
         let got = deadline(session).value();
         assert_eq!(got, expected.map(|time| time.as_nanos()), "{at}");
-        seen.deadlines += usize::from(got.is_some());
+        seen.deadlines.push(got);
     }
 
     assert_eq!(locsim_session_destroy(session), LOCSIM_OK);
@@ -365,7 +378,7 @@ fn every_example_gives_the_same_samples_statuses_and_deadlines_as_the_supervisor
             // The script did what it was written to do. At an interval
             // of a second or less, the on-time polls alone meet seven
             // ticks in the first run and five in the second.
-            assert!(seen.samples >= 12, "example {n}: {}", seen.samples);
+            assert!(seen.samples.len() >= 12, "example {n}");
             // At least the two runs the script starts, numbered upwards
             // from 1. There are more where a run failed on its own and
             // the supervisor replaced it; the session did the same.
@@ -376,7 +389,8 @@ fn every_example_gives_the_same_samples_statuses_and_deadlines_as_the_supervisor
             for (step, error) in &seen.failed_polls {
                 assert_eq!(seen.statuses[step + 1], LOCSIM_OK, "example {n}: {error:?}");
             }
-            assert!(seen.deadlines >= 40, "example {n}: {}", seen.deadlines);
+            let with_deadline = seen.deadlines.iter().flatten().count();
+            assert!(with_deadline >= 40, "example {n}: {with_deadline}");
             for refused in [
                 LOCSIM_ERR_PROVIDER_TRANSITION,
                 LOCSIM_ERR_SCHEDULE_CLOCK_WENT_BACKWARDS,
@@ -400,7 +414,169 @@ fn a_run_whose_times_run_out_fails_once_with_overflow_like_the_supervisor() {
     // Reported by one call. This error is permanent, so no restart follows
     // and nothing reports it again until the session is started anew.
     assert_eq!(seen.statuses[first + 1], LOCSIM_OK);
-    assert!(seen.samples >= 1);
+    assert!(!seen.samples.is_empty());
+}
+
+// --- Runs that fail, whatever the scenario ------------------------------
+
+/// The real model of a scenario until its `fail_at`-th sample (from 0),
+/// which is an error instead.
+struct FailsAt {
+    real: Box<dyn MovementModel + Send>,
+    calls: u64,
+    fail_at: u64,
+}
+
+impl MovementModel for FailsAt {
+    fn sample_at(&mut self, at: Timestamp) -> Result<MovementSample, MovementError> {
+        let call = self.calls;
+        self.calls += 1;
+        if call == self.fail_at {
+            return Err(MovementError::InvalidConfiguration("injected failure"));
+        }
+        self.real.sample_at(at)
+    }
+
+    fn is_complete(&self) -> bool {
+        self.real.is_complete()
+    }
+}
+
+/// A supervisor over the real provider of `scenario`, whose first
+/// `failing_runs` runs fail at their fourth sample. Two of them built with
+/// the same arguments behave alike: each has its own count of runs.
+fn failing(scenario: &Scenario, failing_runs: u32) -> Supervisor<SimulationProvider> {
+    let built = AtomicU32::new(0);
+    let provider = SimulationProvider::with_model_factory(
+        scenario.clone(),
+        Box::new(move |scenario| {
+            let run = built.fetch_add(1, Ordering::Relaxed);
+            let real = model_for(scenario)?;
+            Ok(if run < failing_runs {
+                Box::new(FailsAt {
+                    real,
+                    calls: 0,
+                    fail_at: 3,
+                })
+            } else {
+                real
+            })
+        }),
+    );
+    Supervisor::for_simulation(provider, policy().to_health(), Box::new(NullSink)).unwrap()
+}
+
+/// Start, a poll every quarter of a second for 22 seconds, stop; then a
+/// short second session.
+fn long_script() -> Vec<Step> {
+    let mut steps = vec![Step::Start(0)];
+    steps.extend((0..=88).map(|k| Step::Poll(k * 250 * MS)));
+    steps.extend([Step::Stop, Step::Start(30 * SECOND)]);
+    steps.extend((0..=2).map(|k| Step::Poll((30 + k) * SECOND)));
+    steps.push(Step::Stop);
+    steps
+}
+
+#[test]
+fn a_failing_run_is_reported_once_and_replaced_like_the_supervisor_does() {
+    let _guard = shared();
+    for (n, example) in EXAMPLES.into_iter().enumerate() {
+        let scenario = locsim_scenario::import_scenario(example).unwrap();
+        let label = format!("example {n}, two failing runs");
+        let seen = compare(
+            adopt(failing(&scenario, 2)),
+            failing(&scenario, 2),
+            long_script(),
+            &label,
+        );
+        // The policy allows three restarts, after 1 s, 2 s and 4 s. Run 1
+        // fails at its fourth sample and so does run 2; run 3 is sound; the
+        // second start is run 4.
+        assert_eq!(seen.runs, [1, 2, 3, 4], "{label}");
+        let failures: Vec<usize> = seen.failed_polls.iter().map(|(step, _)| *step).collect();
+        assert_eq!(failures.len(), 2, "{label}");
+        for step in failures {
+            assert_eq!(seen.statuses[step], LOCSIM_ERR_PROVIDER_MOVEMENT, "{label}");
+            // Reported by that one call; the next one is not an error.
+            assert_eq!(seen.statuses[step + 1], LOCSIM_OK, "{label}");
+            // While a restart is pending, the deadline is its time.
+            assert!(seen.deadlines[step].is_some(), "{label}");
+        }
+        // A sample of a later run never carries the number of an earlier one.
+        let numbers: Vec<u64> = seen.samples.iter().map(|sample| sample.run).collect();
+        assert!(numbers.windows(2).all(|pair| pair[0] <= pair[1]), "{label}");
+    }
+}
+
+#[test]
+fn a_run_that_keeps_failing_ends_in_a_session_without_a_deadline() {
+    let _guard = shared();
+    let scenario = locsim_scenario::import_scenario(FIXED).unwrap();
+    let seen = compare(
+        adopt(failing(&scenario, 4)),
+        failing(&scenario, 4),
+        long_script(),
+        "every allowed run fails",
+    );
+    // The first run and three restarts all fail; then nothing is tried
+    // until the session is stopped and started, which is run 5.
+    assert_eq!(seen.runs, [1, 2, 3, 4, 5]);
+    assert_eq!(seen.failed_polls.len(), 4);
+    let (last_failure, _) = seen.failed_polls[3];
+    assert_eq!(seen.statuses[last_failure], LOCSIM_ERR_PROVIDER_MOVEMENT);
+    // Failed for good: no deadline, and polls are not errors.
+    assert_eq!(seen.deadlines[last_failure], None);
+    assert_eq!(seen.deadlines[last_failure + 1], None);
+    assert_eq!(seen.statuses[last_failure + 1], LOCSIM_OK);
+    // fixed.json: run 1 fails at 3 s, and the first restart is due 1 s later.
+    let (first_failure, _) = seen.failed_polls[0];
+    assert_eq!(seen.deadlines[first_failure], Some(4 * SECOND));
+}
+
+// --- Where the count of nanoseconds starts ------------------------------
+
+#[test]
+fn moving_every_time_by_a_constant_moves_the_timestamps_and_nothing_else() {
+    let _guard = shared();
+    for (n, example) in EXAMPLES.into_iter().enumerate() {
+        let base = run_side_by_side(example, 0);
+        for shift in [-5 * SECOND, 123_456_789, 1_700_000_000 * SECOND] {
+            let at = format!("example {n} shifted by {shift}");
+            let moved = run_side_by_side(example, shift);
+            assert_eq!(moved.statuses, base.statuses, "{at}");
+            assert_eq!(moved.runs, base.runs, "{at}");
+            let unshifted: Vec<Option<i64>> = moved
+                .deadlines
+                .iter()
+                .map(|deadline| deadline.map(|time| time - shift))
+                .collect();
+            assert_eq!(unshifted, base.deadlines, "{at}");
+            assert_eq!(moved.samples.len(), base.samples.len(), "{at}");
+            for (moved, base) in moved.samples.iter().zip(&base.samples) {
+                assert_eq!(moved.timestamp_ns - shift, base.timestamp_ns, "{at}");
+                // Everything else, bit for bit.
+                let rest = |sample: &LocsimSample| {
+                    (
+                        sample.run,
+                        sample.source,
+                        sample.simulation_state,
+                        (sample.has_speed, sample.has_course),
+                        [
+                            sample.latitude_deg,
+                            sample.longitude_deg,
+                            sample.altitude_m,
+                            sample.horizontal_accuracy_m,
+                            sample.vertical_accuracy_m,
+                            sample.speed_mps,
+                            sample.course_deg,
+                        ]
+                        .map(f64::to_bits),
+                    )
+                };
+                assert_eq!(rest(moved), rest(base), "{at}");
+            }
+        }
+    }
 }
 
 // --- Stated outright, without the supervisor beside it -------------------
