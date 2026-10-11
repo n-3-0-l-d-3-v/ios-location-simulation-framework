@@ -1,0 +1,227 @@
+# EXPERIMENTAL. T11B stage 0: a probe of the toolchain on a hosted macOS runner.
+#
+# It answers four questions and nothing else: is the Rust target for the
+# Apple-silicon iOS Simulator installable; does the existing locsim-ffi crate
+# compile for it as a static library; do iOS Simulator runtimes exist on the
+# runner and does one device boot; and what do the workspace's Rust tests do
+# on macOS.
+#
+# IT IS NOT ACCEPTANCE EVIDENCE. Nothing here launches an app, compiles
+# Swift, or exercises the library on an Apple platform. A green run supports
+# no compatibility claim. T11B is not started.
+#
+# Run by hand only (workflow_dispatch). A standard GitHub-hosted runner, no
+# secrets, no third-party actions, read-only token.
+name: apple-probe (experimental, T11B stage 0)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  IOS_SIM_TARGET: aarch64-apple-ios-sim
+
+jobs:
+  probe:
+    # The standard Apple-silicon runner. Not a larger runner.
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Fetch the commit (plain git; the repository is public)
+        id: fetch
+        run: |
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth 1 origin "${GITHUB_SHA}"
+          git checkout -q FETCH_HEAD
+          echo "commit: $(git rev-parse HEAD)"
+          echo "requested: ${GITHUB_SHA}"
+
+      - name: Runner and image
+        id: runner
+        continue-on-error: true
+        run: |
+          echo "run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}"
+          echo "runner os/arch: ${RUNNER_OS} / ${RUNNER_ARCH}"
+          echo "image: ${ImageOS:-unknown} version ${ImageVersion:-unknown}"
+          sw_vers
+          echo "machine: $(uname -m)"
+          echo "cpus: $(sysctl -n hw.ncpu)   memory bytes: $(sysctl -n hw.memsize)"
+          df -h / | tail -1
+
+      - name: Xcode
+        id: xcode
+        continue-on-error: true
+        run: |
+          xcodebuild -version
+          echo "active developer directory: $(xcode-select -p)"
+          echo "installed Xcode applications:"
+          ls -d /Applications/Xcode*.app
+
+      - name: Rust toolchain as found
+        id: rust
+        continue-on-error: true
+        run: |
+          rustc -vV
+          cargo -V
+          rustup --version 2>/dev/null
+          echo "active toolchain:"
+          rustup show active-toolchain
+          echo "installed targets:"
+          rustup target list --installed
+
+      - name: Simulator runtimes, devices and simctl help
+        id: discover
+        continue-on-error: true
+        run: |
+          echo "== runtimes"
+          xcrun simctl list runtimes
+          echo "== available iPhone devices"
+          xcrun simctl list devices available | grep -E "^--|iPhone" || true
+          echo "== simctl help for boot, bootstatus, launch, location"
+          for command in boot bootstatus launch location; do
+            echo "-- simctl help ${command}"
+            xcrun simctl help "${command}" 2>&1 || true
+          done
+
+      - name: Install the Rust target
+        id: target
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          rustup target add "${IOS_SIM_TARGET}"
+          rustup target list --installed
+
+      - name: Build locsim-ffi as a static library for the Simulator target
+        id: staticlib
+        if: steps.target.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          # The crate's manifest is not changed. This asks for one of the
+          # crate types it already declares.
+          cargo rustc -p locsim-ffi --target "${IOS_SIM_TARGET}" --crate-type staticlib
+          library="target/${IOS_SIM_TARGET}/debug/liblocsim_ffi.a"
+          ls -l "${library}"
+          echo "== architecture"
+          lipo -info "${library}"
+          echo "== exported locsim symbols"
+          nm -gU "${library}" 2>/dev/null | awk '{print $NF}' | grep '^_locsim_' | sort -u | tee symbols.txt
+          echo "count: $(wc -l < symbols.txt | tr -d ' ')   (the header declares 15)"
+          echo "== declared in the header"
+          grep -oE 'locsim_[a-z_]+\(' crates/locsim-ffi/include/locsim.h | tr -d '(' | sort -u | sed 's/^/_/' > declared.txt
+          if diff declared.txt symbols.txt; then echo "symbols equal the header's declarations"; else echo "SYMBOLS DIFFER FROM THE HEADER"; exit 1; fi
+
+      - name: Diagnostic - build every crate type the manifest declares (rlib, cdylib, staticlib)
+        id: alltypes
+        if: steps.target.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          cargo build -p locsim-ffi --target "${IOS_SIM_TARGET}"
+          ls -l "target/${IOS_SIM_TARGET}/debug/" | grep -i locsim_ffi
+
+      - name: Boot one iPhone Simulator
+        id: boot
+        if: steps.target.outcome == 'success' && steps.staticlib.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          xcrun simctl list devices available -j > devices.json
+          # The first available iPhone of the newest iOS 18 runtime, or
+          # failing that of any runtime.
+          python3 - <<'PY' > chosen.txt
+          import json
+          data = json.load(open("devices.json"))["devices"]
+          def phones(runtime):
+              return [d for d in data[runtime] if d.get("isAvailable") and d["name"].startswith("iPhone")]
+          runtimes = sorted(r for r in data if "iOS" in r and phones(r))
+          preferred = [r for r in runtimes if "iOS-18" in r] or runtimes
+          runtime = preferred[-1]
+          device = phones(runtime)[0]
+          print(device["udid"], runtime, device["name"], sep="|")
+          PY
+          IFS='|' read -r udid runtime name < chosen.txt
+          echo "selected device: ${name}"
+          echo "runtime: ${runtime}"
+          echo "udid: ${udid}"
+          echo "memory before boot:"; vm_stat | head -5
+          start=$(date +%s)
+          echo "+ xcrun simctl boot ${udid}"
+          xcrun simctl boot "${udid}"
+          echo "+ xcrun simctl bootstatus ${udid} -b"
+          xcrun simctl bootstatus "${udid}" -b
+          echo "boot completed after $(( $(date +%s) - start )) s"
+          echo "== booted devices"
+          xcrun simctl list devices | grep -i booted
+          echo "runtime version reported by the device: $(xcrun simctl getenv "${udid}" SIMULATOR_RUNTIME_VERSION)"
+          echo "memory after boot:"; vm_stat | head -5
+          echo "+ xcrun simctl shutdown ${udid}"
+          xcrun simctl shutdown "${udid}"
+
+      - name: Diagnostic - the workspace's Rust tests on the macOS host
+        id: hosttests
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
+          # The host target, not the Simulator target. A failure here is a
+          # finding about a crate on macOS, not about the Apple FFI build.
+          echo "host target: $(rustc -vV | sed -n 's/^host: //p')"
+          set +e
+          cargo test --workspace --no-fail-fast > hosttests.log 2>&1
+          status=$?
+          set -e
+          grep -E "^(running [0-9]+ tests|test result:|     Running|   Doc-tests)" hosttests.log || true
+          echo "== failures, if any"
+          grep -E "^(test .* FAILED|failures:|error(\[|:)|---- .* stdout ----)" hosttests.log || echo "none reported"
+          awk '/^test result:/ {passed += $4; failed += $6} END {print "total passed=" passed " failed=" failed}' hosttests.log
+          if [ "${status}" -ne 0 ]; then
+            echo "== last 120 lines of the log"
+            tail -120 hosttests.log
+          fi
+          exit "${status}"
+
+      - name: Summary
+        if: always()
+        env:
+          FETCH: ${{ steps.fetch.outcome }}
+          RUNNER_INFO: ${{ steps.runner.outcome }}
+          XCODE: ${{ steps.xcode.outcome }}
+          RUST: ${{ steps.rust.outcome }}
+          DISCOVER: ${{ steps.discover.outcome }}
+          TARGET: ${{ steps.target.outcome }}
+          STATICLIB: ${{ steps.staticlib.outcome }}
+          ALLTYPES: ${{ steps.alltypes.outcome }}
+          BOOT: ${{ steps.boot.outcome }}
+          HOSTTESTS: ${{ steps.hosttests.outcome }}
+        run: |
+          {
+            echo "PROBE SUMMARY (experimental; not acceptance evidence)"
+            echo "commit=${GITHUB_SHA}"
+            echo "image=${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "step.fetch_commit=${FETCH}"
+            echo "step.runner_info=${RUNNER_INFO}"
+            echo "step.xcode_info=${XCODE}"
+            echo "step.rust_info=${RUST}"
+            echo "step.simulator_discovery=${DISCOVER}"
+            echo "step.rust_target_install=${TARGET}"
+            echo "step.staticlib_build_ios_sim=${STATICLIB}"
+            echo "step.all_crate_types_build_ios_sim=${ALLTYPES}"
+            echo "step.simulator_boot=${BOOT}"
+            echo "step.macos_host_workspace_tests=${HOSTTESTS}"
+            echo "unverified=swift_compilation,linking_into_an_app,app_launch,library_execution_on_ios,core_location,gpx"
+          } | tee summary.txt
+          {
+            echo '```'
+            cat summary.txt
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          # The run is red if any probed step failed, so that its status is
+          # not mistaken for a pass. Read the lines above for which.
+          if grep -q "=failure" summary.txt; then exit 1; fi
