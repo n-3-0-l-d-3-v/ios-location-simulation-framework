@@ -19,10 +19,10 @@ resumed, only started again from its beginning.
 
 Ticket T11, the platform adapter, is open and in two parts. T11A, a C
 interface to one supervised session (`crates/locsim-ffi`, header
-`crates/locsim-ffi/include/locsim.h`), is implemented and awaiting its
-closing review; it has been called from Rust tests and from a C program
-built with MSVC and with MinGW gcc. T11B, the Apple side, has not started
-and needs a Mac with Xcode: there is no Swift adapter, no app, and nothing
+`crates/locsim-ffi/include/locsim.h`), is done and was closed on
+2026-10-11; it has been called from Rust tests and from a C program built
+with MSVC and with MinGW gcc, on Windows x86_64 only. T11B, the Apple side,
+has not started, has not been authorised, and needs a Mac with Xcode: there is no Swift adapter, no app, and nothing
 has been built for or run on an iPhone, the iOS Simulator or a Mac.
 
 All of it is tested on one Windows desktop host and nowhere else.
