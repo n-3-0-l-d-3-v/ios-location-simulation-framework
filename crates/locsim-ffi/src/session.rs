@@ -26,7 +26,7 @@ use crate::status::*;
 use locsim_core::provider::SimulationProvider;
 use locsim_health::{HealthPolicy, NullSink, Supervisor};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 /// A session handle. Zero is never a valid one.
 pub type LocsimSession = u64;
@@ -63,7 +63,7 @@ const _: () = assert!(std::mem::size_of::<LocsimPolicy>() == 64);
 const _: () = assert!(std::mem::align_of::<LocsimPolicy>() == 8);
 
 impl LocsimPolicy {
-    fn to_health(self) -> HealthPolicy {
+    pub(crate) fn to_health(self) -> HealthPolicy {
         HealthPolicy {
             max_recovery_attempts: self.max_recovery_attempts,
             backoff_initial_s: self.backoff_initial_s,
@@ -78,16 +78,15 @@ impl LocsimPolicy {
 }
 
 pub(crate) struct Session {
-    // Nothing drives a session yet; the operations of the next stages do.
-    #[allow(dead_code)]
-    supervisor: Supervisor<SimulationProvider>,
+    pub(crate) supervisor: Supervisor<SimulationProvider>,
 }
 
 /// What a handle's cell holds.
 pub(crate) enum State {
-    // Not read yet, for the same reason as `Session::supervisor`.
-    #[allow(dead_code)]
     Open(Box<Session>),
+    /// A call on the session panicked. The session has been released; the
+    /// handle stays valid so that the caller is told, and can destroy it.
+    Poisoned,
     /// The session was destroyed. A call that reached the cell before that
     /// and locks it afterwards finds this and does nothing.
     Closed,
@@ -99,7 +98,6 @@ pub(crate) enum State {
 #[cfg(test)]
 impl Drop for Session {
     fn drop(&mut self) {
-        use std::sync::TryLockError;
         crate::hooks::note_session_drop(crate::hooks::DropConditions {
             during_a_panic: std::thread::panicking(),
             registry_locked: matches!(REGISTRY.try_lock(), Err(TryLockError::WouldBlock)),
@@ -119,8 +117,94 @@ static REGISTRY: Mutex<Registry<State>> = Mutex::new(Registry::new());
 
 /// The registry, whether or not a thread once panicked while holding it:
 /// every change to it leaves it valid at each step (see `registry.rs`).
-fn registry() -> MutexGuard<'static, Registry<State>> {
+pub(crate) fn registry() -> MutexGuard<'static, Registry<State>> {
     REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Runs `body`, turning a panic that reaches this far into a status. Used
+/// around the whole of every call, so that nothing unwinds into C.
+pub(crate) fn contain<R>(
+    body: impl FnOnce() -> Result<R, LocsimStatus>,
+) -> Result<R, LocsimStatus> {
+    catch_unwind(AssertUnwindSafe(body)).unwrap_or_else(|payload| {
+        // Dropping a panic payload can itself panic.
+        std::mem::forget(payload);
+        Err(LOCSIM_ERR_PANIC)
+    })
+}
+
+/// Releases what a cell held, on its own: the caller holds no lock and no
+/// panic is unwinding. Says whether that went without a panic.
+fn release(state: State) -> bool {
+    match catch_unwind(AssertUnwindSafe(move || drop(state))) {
+        Ok(()) => true,
+        Err(payload) => {
+            std::mem::forget(payload);
+            false
+        }
+    }
+}
+
+/// Runs `operation` on the session `handle` names, if it names one and
+/// nothing else is using it.
+///
+/// - Never waits: a session in use is `LOCSIM_ERR_BUSY`.
+/// - A session destroyed after the handle was looked up and before its
+///   lock was taken is `LOCSIM_ERR_INVALID_HANDLE`: the cell says so.
+/// - If `operation` panics, the session can no longer be trusted. It is
+///   taken out of the cell and released after the lock, this call returns
+///   `LOCSIM_ERR_PANIC`, and every later one `LOCSIM_ERR_POISONED` until
+///   the handle is destroyed. A lock that a panic outside `operation`
+///   poisoned is treated the same way by the next call that meets it.
+pub(crate) fn with_session<R>(
+    handle: LocsimSession,
+    operation: impl FnOnce(&mut Session) -> Result<R, LocsimStatus>,
+) -> Result<R, LocsimStatus> {
+    let found = registry().get(handle);
+    let cell = found.ok_or(LOCSIM_ERR_INVALID_HANDLE)?;
+    #[cfg(test)]
+    crate::hooks::reach(crate::hooks::Stop::BeforeLock);
+
+    let mut guard = match cell.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => return Err(LOCSIM_ERR_BUSY),
+        Err(TryLockError::Poisoned(poisoned)) => {
+            let mut guard = poisoned.into_inner();
+            if matches!(*guard, State::Open(_)) {
+                let broken = std::mem::replace(&mut *guard, State::Poisoned);
+                drop(guard);
+                release(broken);
+                return Err(LOCSIM_ERR_POISONED);
+            }
+            guard
+        }
+    };
+    let session = match &mut *guard {
+        State::Open(session) => session,
+        State::Poisoned => return Err(LOCSIM_ERR_POISONED),
+        State::Closed => return Err(LOCSIM_ERR_INVALID_HANDLE),
+    };
+    #[cfg(test)]
+    {
+        crate::hooks::reach(crate::hooks::Stop::HoldingLock);
+        crate::hooks::fire(crate::hooks::Point::HoldingLock);
+    }
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        crate::hooks::fire(crate::hooks::Point::Operation);
+        operation(session)
+    }));
+    match outcome {
+        Ok(result) => result,
+        Err(payload) => {
+            std::mem::forget(payload);
+            let broken = std::mem::replace(&mut *guard, State::Poisoned);
+            drop(guard);
+            release(broken);
+            Err(LOCSIM_ERR_PANIC)
+        }
+    }
 }
 
 /// Why a session was not created.
@@ -202,8 +286,8 @@ unsafe fn create(
 
     // SAFETY: as for `struct_size`; every bit pattern is a `LocsimPolicy`.
     let policy = unsafe { policy.read_unaligned() }.to_health();
-    // No event leaves a session yet: the queue comes with the operations
-    // that can produce one. `event_capacity` is checked and not yet used.
+    // Events are discarded for now: the queue comes with the functions that
+    // read it. `event_capacity` is checked and not yet used.
     let supervisor = Supervisor::for_simulation(
         SimulationProvider::new(scenario),
         policy,
@@ -336,12 +420,10 @@ pub extern "C" fn locsim_session_destroy(session: LocsimSession) -> LocsimStatus
         }
     };
     // Then the session's own destructors, caught separately.
-    match catch_unwind(AssertUnwindSafe(move || drop(state))) {
-        Ok(()) => LOCSIM_OK,
-        Err(payload) => {
-            std::mem::forget(payload);
-            LOCSIM_ERR_PANIC
-        }
+    if release(state) {
+        LOCSIM_OK
+    } else {
+        LOCSIM_ERR_PANIC
     }
 }
 

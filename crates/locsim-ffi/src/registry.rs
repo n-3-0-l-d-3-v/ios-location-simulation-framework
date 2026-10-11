@@ -120,7 +120,9 @@ impl<T> Registry<T> {
         Ok(value)
     }
 
-    #[cfg(test)]
+    /// The cell a handle names. The caller locks it after letting go of the
+    /// registry, and must look at what it then holds: the handle may have
+    /// been closed in between.
     pub(crate) fn get(&self, handle: u64) -> Option<Arc<Mutex<T>>> {
         let (index, generation) = decode(handle)?;
         let slot = self.slots.get(index)?;

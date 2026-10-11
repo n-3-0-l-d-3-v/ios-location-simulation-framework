@@ -14,9 +14,10 @@
 //! any location appear anywhere. It is the boundary a platform adapter can
 //! call. It reads no clock and no file.
 //!
-//! Present so far (T11A, stage 1): the handle registry, the status codes,
-//! [`locsim_abi_version`], [`locsim_session_create`] and
-//! [`locsim_session_destroy`]. A session cannot be driven yet.
+//! Present so far (T11A, stage 2): creating and destroying a session, its
+//! lifecycle, polling it for samples, and asking when to call next. A
+//! session's health and its events cannot be read yet; events are
+//! discarded.
 //!
 //! This is the only crate of the workspace that contains `unsafe`. It is
 //! confined to reading and writing through the caller's pointers.
@@ -24,11 +25,25 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+mod codes;
 #[cfg(test)]
 mod hooks;
+mod ops;
 mod registry;
 mod session;
 mod status;
+#[cfg(test)]
+mod testing;
+
+pub use codes::{
+    LOCSIM_SOURCE_REPLAY, LOCSIM_SOURCE_SIMULATION, LOCSIM_SOURCE_TEST, LOCSIM_STATE_ERROR,
+    LOCSIM_STATE_IDLE, LOCSIM_STATE_PAUSED, LOCSIM_STATE_RECOVERING, LOCSIM_STATE_RUNNING,
+    LOCSIM_STATE_STARTING, LOCSIM_STATE_STOPPING,
+};
+pub use ops::{
+    locsim_session_next_deadline, locsim_session_pause, locsim_session_poll, locsim_session_resume,
+    locsim_session_start, locsim_session_stop, LocsimSample,
+};
 
 pub use session::{
     locsim_session_create, locsim_session_destroy, LocsimPolicy, LocsimSession,
