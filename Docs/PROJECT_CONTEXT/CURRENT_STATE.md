@@ -223,9 +223,11 @@ What it has to produce before any Apple row changes, each with a recorded
 run: the Rust crates built and linked for Apple targets; the header
 consumed by Swift; the conversion to `CLLocation`; a driver that calls
 `poll` and `check` on a real clock, with a decision about suspension; GPX
-that `simctl` and Xcode accept; and runs on the Simulator. These are the
-areas agreed for T11B; **its acceptance criteria in detail have not been
-written or approved.**
+that `simctl` and Xcode accept; and runs on the Simulator. **Its acceptance
+criteria, with the evidence each needs and the decisions each waits for,
+are in `PROJECT_BRIEF.md`, "Acceptance criteria of T11B".** They were
+written before any design of T11B; none has been worked on, and the
+decisions they list as prerequisites have not been made.
 
 **What the current machine can and cannot do.** It is Windows with Rust,
 MSVC and MinGW gcc, and no Swift toolchain. No part of T11B can be run on

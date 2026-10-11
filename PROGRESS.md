@@ -297,9 +297,11 @@ Findings during T10:
   link the crates for Apple targets; consume `locsim.h` from Swift; convert
   a sample to a `CLLocation`; a driver that calls `poll` and `check` on a
   real clock, with a decision about a suspended app; GPX that `simctl` and
-  Xcode accept; runs on the Simulator. Its design and its acceptance
-  criteria in detail are not written. It cannot be done, or partly done, on
-  the Windows machine used so far.
+  Xcode accept; runs on the Simulator. Its acceptance criteria are written
+  (`Docs/PROJECT_CONTEXT/PROJECT_BRIEF.md`, "Acceptance criteria of T11B");
+  its design is not, and the decisions those criteria wait for have not
+  been made. It cannot be done, or partly done, on the Windows machine used
+  so far.
 - **The pause/resume defect** needs a ticket of its own (see "Known
   Issues").
 - What T11B can build on: the header is the whole interface; a session is

@@ -156,16 +156,70 @@ in the repository. Its ticket plan is reproduced here so that it is.
 | T14 | Reliability testing | Long-duration runs, repeated start/stop, pause/resume, failure injection, corrupted configuration, memory | Planned |
 | T15 | Documentation | Architecture, compatibility, setup, testing, limitations, troubleshooting | Planned |
 
-**T11A is accepted when** (agreed with its design, 2026-10-11): the full
-Rust gate passes with the tests of the four older crates intact; no
-behaviour of those crates changed; the C harness, compiled against the
-public header and linked to the built library, exits 0; and the project
-documents describe what exists and what was run. **T11B's acceptance
-criteria have not been written.** What is agreed is that every Apple claim
-needs a recorded run with Apple tooling, reported level by level: Rust
-compilation for the target, linking, Swift compilation against the header,
-Simulator execution, device execution. Success at one level says nothing
-about the next.
+### Acceptance criteria of T11A
+
+T11A is accepted when all of these hold. Whether they do is for the project
+owner to say; this list does not close the ticket.
+
+1. **The Rust gates pass** on the tree to be accepted: `cargo test`,
+   `cargo fmt --all -- --check`,
+   `cargo clippy --all-targets --all-features -- -D warnings`,
+   `cargo clippy --workspace --all-targets -q -- -D warnings`,
+   `cargo build -p locsim-ffi`. The tests of the four older crates are
+   intact: none removed, none weakened.
+2. **The C harness passes**, `crates/locsim-ffi/harness/run.sh`, exit 0, in
+   the configurations `Docs/COMPATIBILITY.md` reports: a C caller compiled
+   by MSVC against the DLL and the static library, and by MinGW gcc against
+   the DLL, each for the debug and the release library. It is a real C
+   program linked to the built library; `cargo test` is not a substitute.
+3. **The header is checked against the Rust ABI**: the size, alignment and
+   every field offset of each public struct, asserted in the header and
+   accepted by both C compilers; the DLL's exports equal to the header's
+   declarations; every constant and function name equal on both sides
+   (`tests/header.rs`); and the behaviour the header describes, by the
+   harness. (Argument types are checked by use, not mechanically.)
+4. **No runtime behaviour of the four older crates changed.** The one edit
+   to them is the doc comment on `Timestamp` in `locsim-core`, made in the
+   documentation stage with the owner's permission: documentation only.
+5. **Platform claims go no further than what was run**: Windows 11 x86_64,
+   rustc 1.98.1 for `x86_64-pc-windows-msvc`, the six harness
+   configurations. Everything else is Untested and says so.
+6. **The project documents agree with each other and with the code** on the
+   split into T11A and T11B, on the time contract, and on the known issues,
+   the open pause/resume defect among them.
+
+### Acceptance criteria of T11B
+
+Written on 2026-10-11 at the owner's request, before any design of T11B.
+**Nothing here has been done; every item is Untested.** A criterion passes
+only on the evidence named, recorded with the versions it was produced on.
+Where a criterion depends on something not yet decided, that is listed as a
+prerequisite: T11B's design must settle it, with the owner, before the
+criterion can be worked on. None of these decisions is made here.
+
+Prerequisites for the whole ticket: a Mac with Xcode; the Rust toolchain
+and the Apple target or targets to build for; how the library and header
+are packaged for Xcode; what the "integration target" is that the library
+is linked into and the adapter is tested in (T12 is the demo application);
+the minimum iOS and Xcode versions; whether the Apple build unwinds or
+aborts on panic (the C interface's panic contract holds only when it
+unwinds).
+
+| # | Criterion | Evidence required for a pass | Prerequisite decisions |
+|---|---|---|---|
+| 1 | **Apple build.** The Rust library builds for each intended Apple target | The exact command, the `rustc -vV` output, the target triple or triples, the profile and the panic strategy, with a build that completes; every target-specific warning, error or change needed, reported. A compile check alone is recorded as a compile check | Which targets (device, Simulator on Apple silicon, Simulator on Intel) |
+| 2 | **Linking.** The library links into the integration target | A link of the real target that completes, with the linker and Xcode versions and the link command or build log kept; the list of system libraries it needed | Static library, XCFramework or another packaging; the integration target |
+| 3 | **Swift integration.** The actual Swift adapter compiles against `include/locsim.h` | A build of the adapter's own sources (not a sketch) importing the header unmodified; a Swift test that reads `locsim_abi_version()` and compares it with `LOCSIM_ABI_VERSION`; Swift tests that the size, stride and alignment Swift sees for each of the four structs equal the header's, and that each field converts to the Swift type the adapter uses | How the header is exposed to Swift (module map or bridging header) |
+| 4 | **Location conversion.** A sample becomes a `CLLocation` correctly | Unit tests, run on an Apple platform, for: coordinates passed through unchanged and valid for `CLLocationCoordinate2D`; altitude and both accuracies; `has_speed == 0` and `has_course == 0` becoming Core Location's negative "invalid" value and never 0 (C12); known speed and course passed through; the timestamp converted by the documented rule; a change of `run` surfaced as a discontinuity (C21). No value computed on the Swift side that the core computed (D13) | How a sample's time, on the caller's scale, becomes a `CLLocation.timestamp` |
+| 5 | **Driver and clock.** Something calls `poll` and `check` at the right times and owns the session | Tests with a controllable clock for: polling by `locsim_session_next_deadline`; `check` being called so that a stall is noticed; pause and resume; stop and start; destroy on teardown and after a failed create; one polling caller per session. A statement of the clock used and of what happens when the app is suspended, each with a test. Times passed to the interface never decrease within a session and are on one scale (C2); the interface itself is not changed to suit the driver | Which clock; which timer; behaviour on suspension and on return to the foreground |
+| 6 | **Error handling.** Failures stay failures | Tests for: a refused scenario and a refused policy (the status and the text reach the caller); every non-OK status the adapter can meet, `LOCSIM_ERR_BUSY`, `LOCSIM_ERR_POISONED` and `LOCSIM_ERR_INVALID_HANDLE` among them; a run that fails and is restarted; a session that fails for good. In each, the adapter delivers no location that the session did not emit: no repeated, interpolated or default sample stands in for a missing one | How the adapter reports errors and health to its app |
+| 7 | **GPX.** The intended GPX workflow is validated | For whatever is built: files produced from known samples compared with expected files, and checked against the GPX schema; malformed and edge-case inputs to any parser the project writes refused with an error. **Kept apart:** that a file is well formed is one result; that the Simulator or Xcode accepts it and moves the simulated location as the file says is another, and needs criterion 8's kind of evidence | Whether GPX is in scope as export only or also import; whether it is written in Rust or Swift; which tool consumes it |
+| 8 | **Simulator.** One documented end-to-end run | A written procedure that someone else can repeat; the macOS, Xcode, Simulator runtime and device-type versions; an app built with the adapter receiving samples from a named scenario in an iOS Simulator; the received locations compared with the reference for that scenario (`examples/reference.rs` or its successor); the logs or recorded output kept in the repository or referenced from it. Then, and only for the combination that was run, the Simulator row of `Docs/COMPATIBILITY.md` may change | The test app; where evidence is kept |
+| 9 | **Regression.** Nothing that worked stops working | The Rust gates of T11A on the tree to be accepted; the adapter's own tests; where the machine allows it, the C harness. **And a test at the adapter's level for the open pause/resume defect**: a moving scenario paused and resumed, asserting what the adapter does when the session then reports a failed run (the status, the new run number, no invented sample). That test documents the defect; it does not resolve it. The defect is resolved only by its own core fix passing its own criteria (pauses of several lengths; a real discontinuity across a pause still rejected) | None; the defect has its own ticket |
+| 10 | **Scope and claims.** What is said matches what was run | A reading of every document changed by T11B against the evidence above. No claim of physical-device support, of replacing the system's location for other apps, or of compatibility with or evasion of any anti-spoofing or integrity check: each would need separately authorised work and its own evidence, and the last is outside the project's scope altogether (C18). Rows of `Docs/COMPATIBILITY.md` change only for combinations that were run; the rest stay Untested | None |
+
+A physical device is not part of T11B as agreed. If it is added, it needs
+its own criterion and its own recorded runs.
 
 **Unowned work, recorded so it is not lost.** Checkpoint/resume of a running
 simulation (deferred from T09 by decision; it needs engine state the core

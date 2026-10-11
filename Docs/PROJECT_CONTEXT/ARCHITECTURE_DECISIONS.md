@@ -528,8 +528,10 @@ review after each.
 - T11B: who calls `poll` and `check`, on what timer, with which clock, and
   what a suspended app means; how a sample's time becomes a
   `CLLocation.timestamp`; how the crates are built and packaged for Apple
-  targets; whether GPX is written in Rust or in Swift; what a run on the
-  Simulator must show. Its acceptance criteria are not written.
+  targets; whether GPX is written in Rust or in Swift, and whether it is
+  export only; whether the Apple build unwinds on panic; which targets and
+  which versions. These are the prerequisites named beside T11B's
+  acceptance criteria in `PROJECT_BRIEF.md`.
 - Unowned: the pause/resume gate defect in the core (see `PROGRESS.md`).
 - Unowned: checkpoint/resume (D16); `MOVEFILE_WRITE_THROUGH` on Windows; a
   timer or driver; a bridge from `StoreError` to fault reports.
