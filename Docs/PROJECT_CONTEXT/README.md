@@ -7,7 +7,8 @@ must not be broken, what has been done, and how to resume.
 
 It was written on 2026-10-09 at commit `1be8852`, after ticket T07, and
 updated on 2026-10-10 after ticket T10, and on 2026-10-11 at commit
-`e7fad44`, during ticket T11 (after the implementation stages of T11A).
+`e7fad44`, during ticket T11 (T11A was closed that day; T11B has not
+started).
 **Everything here can go stale. The repository is the truth; these
 documents are a map of it.**
 
@@ -75,9 +76,9 @@ been run on an iPhone, an iOS Simulator, or any Apple platform.**
   digest and atomic replacement (`crates/locsim-store`); and a supervisor
   with a watchdog, bounded restart and events (`crates/locsim-health`).
 - Ticket T11 is open, in two parts. **T11A**, a C interface to a supervised
-  session (`crates/locsim-ffi`, with a public header and a C harness), is
-  implemented and awaiting its closing review. **T11B**, the Apple side, is
-  not started.
+  session (`crates/locsim-ffi`, with a public header and a C harness), was
+  closed on 2026-10-11, validated on Windows x86_64 only. **T11B**, the
+  Apple side, is not started and not authorised.
 - Verified on 2026-10-11 (Windows 11, rustc 1.98.1), code as of `e7fad44`:
   594 tests pass, `cargo fmt` and `cargo clippy -D warnings` are clean, and
   the C harness passes with MSVC and with MinGW gcc. The harness is a
@@ -87,5 +88,6 @@ been run on an iPhone, an iOS Simulator, or any Apple platform.**
 - A stored or failed simulation cannot be resumed, only started again.
   There is no timer or real-time driver: everything is polled. One core
   defect is open (a sample after a pause and resume can be rejected).
-- **Next: the closing review of T11A, then T11B, which cannot be done on
+- **Next: T11B, once the project owner authorises it and has decided the
+  prerequisites listed with its acceptance criteria. It cannot be done on
   the Windows machine used so far: it needs a Mac with Xcode.**
