@@ -112,7 +112,12 @@ jobs:
           echo "== architecture"
           lipo -info "${library}"
           echo "== exported locsim symbols"
-          nm -gU "${library}" 2>/dev/null | awk '{print $NF}' | grep '^_locsim_' | sort -u | tee symbols.txt
+          # nm can end with a non-zero status on an archive (the first run of
+          # this probe stopped here, after printing all fifteen symbols). Its
+          # status is reported, not obeyed: the comparison below is the check.
+          { nm -gU "${library}" 2>nm-errors.txt || echo "nm exit status: $?" >&2; } | awk '{print $NF}' | grep '^_locsim_' | sort -u | tee symbols.txt
+          echo "nm wrote $(wc -l < nm-errors.txt | tr -d ' ') lines to standard error; the first few:"
+          head -5 nm-errors.txt
           echo "count: $(wc -l < symbols.txt | tr -d ' ')   (the header declares 15)"
           echo "== declared in the header"
           grep -oE 'locsim_[a-z_]+\(' crates/locsim-ffi/include/locsim.h | tr -d '(' | sort -u | sed 's/^/_/' > declared.txt
