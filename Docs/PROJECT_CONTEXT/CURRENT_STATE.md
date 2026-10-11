@@ -1,9 +1,9 @@
 # Current state — fresh-session entry point
 
 > **Re-check the repository before relying on anything here.** This file was
-> last rewritten on 2026-10-11, after the implementation stages of T11A and
-> as part of its documentation stage. It describes code commit `e7fad44`
-> plus documentation commits. Run the checklist at the bottom first.
+> last rewritten on 2026-10-11, in the documentation stage of T11A, and
+> updated the same day when T11A was closed. It describes code commit
+> `e7fad44` plus documentation commits. Run the checklist at the bottom first.
 > Whenever this file and the repository disagree, the repository is right
 > and this file needs fixing.
 
@@ -42,14 +42,18 @@ are expected. `locsim-store`'s `platform` has three more tests under
 - **Current: T11 — Platform adapter. Open.** It was split, by decision of
   the project owner (D18), into:
   - **T11A — the C interface.** A Rust crate, `locsim-ffi`, a public C
-    header and a C harness, tested on Windows. **Its five implementation
-    stages are done and were each reviewed. Its documentation stage is this
-    rewrite, which is awaiting review. T11A is not closed until that review
-    says so.**
+    header and a C harness, tested on Windows. **Closed by the project
+    owner on 2026-10-11**, at commit `74c6c16`, after review of its five
+    implementation stages and its documentation stage. What was closed is
+    what was run: Windows x86_64, in the configurations of
+    `Docs/COMPATIBILITY.md`, with the limitations recorded here and in
+    `PROGRESS.md`.
   - **T11B — everything Apple.** Building and linking for Apple targets,
     the Swift adapter, conversion to `CLLocation`, the driver and its
-    clock, GPX, and runs on the Simulator. **Not started. Blocked: it needs
-    a Mac with Xcode.**
+    clock, GPX, and runs on the Simulator. **Not started and not
+    authorised.** Its acceptance criteria are approved as a planning
+    baseline; the decisions they name as prerequisites have not been made;
+    and it needs a Mac with Xcode.
 - **T11 is complete only when T11B is implemented and has been run with
   Apple tooling.** Nothing done so far is evidence about iOS.
 
@@ -225,9 +229,11 @@ consumed by Swift; the conversion to `CLLocation`; a driver that calls
 `poll` and `check` on a real clock, with a decision about suspension; GPX
 that `simctl` and Xcode accept; and runs on the Simulator. **Its acceptance
 criteria, with the evidence each needs and the decisions each waits for,
-are in `PROJECT_BRIEF.md`, "Acceptance criteria of T11B".** They were
-written before any design of T11B; none has been worked on, and the
-decisions they list as prerequisites have not been made.
+are in `PROJECT_BRIEF.md`, "Acceptance criteria of T11B".** The project
+owner approved them on 2026-10-11 as a planning baseline. They were written
+before any design of T11B; none has been worked on; and the decisions they
+list as prerequisites still have to be made, explicitly, before any
+implementation. T11B is not authorised to start.
 
 **What the current machine can and cannot do.** It is Windows with Rust,
 MSVC and MinGW gcc, and no Swift toolchain. No part of T11B can be run on
