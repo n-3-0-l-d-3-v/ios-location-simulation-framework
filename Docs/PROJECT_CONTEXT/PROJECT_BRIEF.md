@@ -120,7 +120,7 @@ Assumptions (Decisions unless marked):
 | Health state, watchdog (stall, missed ticks), bounded restart, structured events | Implemented, tested on Windows only. Recovery is a new run, not a resume. Nothing calls the watchdog: there is no timer |
 | Logging to a file or system log | Not implemented: events go to a sink the caller supplies, and through the C interface they wait in a queue the caller empties (platform work, T11B/T12) |
 | CPU, memory and battery metrics | Not implemented (T14) |
-| C ABI to a supervised session: header, handles, lifecycle, samples, health, faults, events | Implemented (T11A, awaiting closing review). Tested on Windows x86_64 only, from Rust and from a C program built with MSVC and with MinGW gcc |
+| C ABI to a supervised session: header, handles, lifecycle, samples, health, faults, events | Implemented (T11A, closed 2026-10-11). Tested on Windows x86_64 only, from Rust and from a C program built with MSVC and with MinGW gcc |
 | Swift adapter, `CLLocation` conversion, driver and clock, GPX for delivery | Planned (T11B). Needs a Mac with Xcode |
 | Demo application | Planned (T12) |
 | Wall-clock soak tests, memory measurements | Planned (T14) |
@@ -149,8 +149,8 @@ in the repository. Its ticket plan is reproduced here so that it is.
 | T09 | Persistence | Reliable configuration persistence and recovery: active scenario, configuration, last known state, route, preferences, schema version; atomic writes (write temporary, validate, replace) | Done for the scenario (with its route and schema version) and the last-known record. Configuration and preferences: nothing to store yet. Resume: deferred, see below |
 | T10 | Health system | Health state, metrics, watchdog, bounded recovery (e.g. three retries with backoff, then FAILED), structured logging with levels | Done: supervisor, policy, events. "Metrics" are the counters and totals of the report; resource metrics are T14. "Logging" is structured events to a caller-supplied sink |
 | **T11** | **Platform adapter** | **The authorised iOS delivery/test adapter; document platform limitations** | **Open. Split by the project owner on 2026-10-11 into T11A and T11B (below). Complete only when T11B is** |
-| T11A | C interface | A Rust crate with a C ABI over one supervised session; a public header; a C harness; tested on Windows | Implementation stages done and reviewed; documentation stage awaiting review. Not closed |
-| T11B | Apple integration | Build and link for Apple targets; Swift adapter; conversion to `CLLocation`; driver, clock and timer; GPX for `simctl` and Xcode; runs on the Simulator | Not started. Needs a Mac with Xcode |
+| T11A | C interface | A Rust crate with a C ABI over one supervised session; a public header; a C harness; tested on Windows | **Closed 2026-10-11** by the project owner, after review of every stage. Validated on Windows x86_64 only, in the configurations of `Docs/COMPATIBILITY.md` |
+| T11B | Apple integration | Build and link for Apple targets; Swift adapter; conversion to `CLLocation`; driver, clock and timer; GPX for `simctl` and Xcode; runs on the Simulator | Not started and not authorised. Acceptance criteria approved as a planning baseline; prerequisites undecided. Needs a Mac with Xcode |
 | T12 | Test application | UI and visualisation: current location, speed, course, accuracy, mode, state, health, sample count; start/pause/resume/stop/reset/load/save; map where practical | Planned |
 | T13 | Integration testing | Whole pipeline: scenario → movement → noise → validation → consistency → scheduler → adapter → app | Planned |
 | T14 | Reliability testing | Long-duration runs, repeated start/stop, pause/resume, failure injection, corrupted configuration, memory | Planned |
@@ -159,7 +159,9 @@ in the repository. Its ticket plan is reproduced here so that it is.
 ### Acceptance criteria of T11A
 
 T11A is accepted when all of these hold. Whether they do is for the project
-owner to say; this list does not close the ticket.
+owner to say. **The owner accepted T11A against them and closed it on
+2026-10-11**, on the evidence recorded at commits `e7fad44` (the C harness
+and the header) and `74c6c16` (the gates re-run on the documentation tree).
 
 1. **The Rust gates pass** on the tree to be accepted: `cargo test`,
    `cargo fmt --all -- --check`,
@@ -190,7 +192,10 @@ owner to say; this list does not close the ticket.
 
 ### Acceptance criteria of T11B
 
-Written on 2026-10-11 at the owner's request, before any design of T11B.
+Written on 2026-10-11 at the owner's request, before any design of T11B,
+and **approved by the owner that day as a planning baseline**. That
+approval does not authorise T11B to start: the prerequisites below need
+explicit decisions first.
 **Nothing here has been done; every item is Untested.** A criterion passes
 only on the evidence named, recorded with the versions it was produced on.
 Where a criterion depends on something not yet decided, that is listed as a
