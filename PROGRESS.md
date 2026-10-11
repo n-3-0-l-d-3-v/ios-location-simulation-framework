@@ -6,12 +6,16 @@ new session, start at [Docs/PROJECT_CONTEXT/README.md](Docs/PROJECT_CONTEXT/READ
 
 ## Current Ticket
 T11 — Platform adapter (open), split into two parts:
-- **T11A — the C interface** (`crates/locsim-ffi`, tested on Windows).
-  Implementation stages 1–5 are done and reviewed. The documentation stage
-  is written and awaiting review. **Not closed.**
+- **T11A — the C interface** (`crates/locsim-ffi`). **Closed by the project
+  owner on 2026-10-11**, after review of its five implementation stages and
+  its documentation stage. Its scope is what was run: Windows x86_64, in
+  the configurations of `Docs/COMPATIBILITY.md`, with the limitations
+  listed under "Known Issues".
 - **T11B — everything Apple** (building for Apple targets, Swift,
-  `CLLocation`, a driver and its clock, GPX, the Simulator). **Not started;
-  blocked: it needs a Mac with Xcode.**
+  `CLLocation`, a driver and its clock, GPX, the Simulator). **Not started
+  and not authorised.** Its acceptance criteria are approved as a planning
+  baseline; the decisions they list as prerequisites have not been made,
+  and it needs a Mac with Xcode.
 
 T11 is complete only when T11B has been implemented and run with Apple
 tooling.
@@ -34,6 +38,10 @@ Repository: https://github.com/n-3-0-l-d-3-v/ios-location-simulation-framework
 - T08 Scenario system (`crates/locsim-scenario`: strict, versioned JSON).
 - T09 Persistence (`crates/locsim-store`: scenario and last-known record,
   digest, atomic replacement; no checkpoint/resume).
+- T11A The C interface (`crates/locsim-ffi`, `include/locsim.h`, a C
+  harness): the first part of T11, closed 2026-10-11. Validated on Windows
+  x86_64 only. What it delivered is summarised under "Latest closed work"
+  below; its history is in `Docs/PROJECT_CONTEXT/TICKET_HISTORY.md`.
 - T10 Health system. Details of T00–T09 are in
   `Docs/PROJECT_CONTEXT/TICKET_HISTORY.md`. T10 delivered a new crate,
   `crates/locsim-health`, depending on `locsim-core` only:
@@ -59,7 +67,10 @@ Repository: https://github.com/n-3-0-l-d-3-v/ios-location-simulation-framework
   - `locsim-core`, `locsim-scenario` and `locsim-store`: no file changed.
 
 ## Current Work
-T11A, awaiting its closing review. It delivered a fifth crate,
+- None in flight. T11B has not been started or authorised.
+
+## Latest closed work: T11A
+Closed on 2026-10-11. It delivered a fifth crate,
 `crates/locsim-ffi`, depending on the core, health and scenario crates and
 on nothing outside the workspace:
 - **One thing is exposed: a supervised simulation session**, built from a
@@ -291,16 +302,18 @@ Findings during T10:
 - The detail is `Docs/COMPATIBILITY.md`.
 
 ## Next
-- **Review of T11A's documentation stage**, and its closure by the project
-  owner.
-- **T11B**, when a Mac with Xcode is available. Agreed areas: build and
+- **Nothing is authorised to start.** T11A is closed; T11 stays open.
+- **T11B**, when the project owner authorises it and a Mac with Xcode is
+  available. Before any implementation, the prerequisites listed with its
+  acceptance criteria need explicit decisions. Agreed areas: build and
   link the crates for Apple targets; consume `locsim.h` from Swift; convert
   a sample to a `CLLocation`; a driver that calls `poll` and `check` on a
   real clock, with a decision about a suspended app; GPX that `simctl` and
   Xcode accept; runs on the Simulator. Its acceptance criteria are written
+  and approved as a planning baseline
   (`Docs/PROJECT_CONTEXT/PROJECT_BRIEF.md`, "Acceptance criteria of T11B");
-  its design is not, and the decisions those criteria wait for have not
-  been made. It cannot be done, or partly done, on the Windows machine used
+  its design is not written, and the decisions those criteria wait for
+  have not been made. It cannot be done, or partly done, on the Windows machine used
   so far.
 - **The pause/resume defect** needs a ticket of its own (see "Known
   Issues").
