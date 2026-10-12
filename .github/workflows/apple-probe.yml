@@ -199,7 +199,7 @@ jobs:
           fi
           exit "${status}"
 
-      - name: Diagnostic - the long-gap recording made on this host, against the one checked in
+      - name: Diagnostic - the long-gap recording made on this host, against the one checked in (made on Windows)
         id: gaprecording
         continue-on-error: true
         timeout-minutes: 15
@@ -208,12 +208,17 @@ jobs:
           # this host writes the same one, and if not, what differs: an
           # outcome, or the last digits of a number.
           cargo run -q -p locsim-health --example gap_diagnostic -- Examples/Scenarios "${RUNNER_TEMP}/long_gap"
+          outcomes=0
           if cmp -s Docs/Diagnostics/long_gap/summary.md "${RUNNER_TEMP}/long_gap/summary.md"; then
             echo "summary.md (the outcome of every case): identical"
           else
             echo "summary.md (the outcome of every case): DIFFERS"
             diff Docs/Diagnostics/long_gap/summary.md "${RUNNER_TEMP}/long_gap/summary.md" | head -40
+            outcomes=1
           fi
+          # The numbers are reported, not judged: they are known to differ
+          # between hosts in their last digits (run 38238724688). The step
+          # fails only if an outcome differs.
           python3 - Docs/Diagnostics/long_gap/results.jsonl "${RUNNER_TEMP}/long_gap/results.jsonl" <<'PY'
           import json, sys
           recorded = [json.loads(line) for line in open(sys.argv[1])]
@@ -251,8 +256,8 @@ jobs:
               print("  %s: %d" % (path, kinds[path]))
           for case, path, a, b in others[:6]:
               print("  case %d %s\n    recorded: %s\n    fresh:    %s" % (case, path, str(a)[:200], str(b)[:200]))
-          sys.exit(1 if lines else 0)
           PY
+          exit "${outcomes}"
 
       - name: Summary
         if: always()
@@ -283,7 +288,7 @@ jobs:
             echo "step.all_crate_types_build_ios_sim=${ALLTYPES}"
             echo "step.simulator_boot=${BOOT}"
             echo "step.macos_host_workspace_tests=${HOSTTESTS}"
-            echo "step.long_gap_recording_equals_checked_in=${GAPRECORDING}"
+            echo "step.long_gap_outcomes_equal_checked_in=${GAPRECORDING}"
             echo "unverified=swift_compilation,linking_into_an_app,app_launch,library_execution_on_ios,core_location,gpx"
           } | tee summary.txt
           {
