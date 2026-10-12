@@ -1,0 +1,7 @@
+// The Clang module that Swift imports as `LocsimFFI`. It names the public
+// header of crates/locsim-ffi and adds nothing to it. Staged next to an
+// unmodified copy of locsim.h by Scripts/apple/build-xcframework.sh.
+module LocsimFFI {
+    header "locsim.h"
+    export *
+}

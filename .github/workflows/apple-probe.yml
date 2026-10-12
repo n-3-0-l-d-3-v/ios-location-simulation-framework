@@ -16,6 +16,12 @@ name: apple-probe (experimental, T11B stage 0)
 
 on:
   workflow_dispatch:
+    inputs:
+      jobs:
+        description: "probe: the toolchain probe. packaging: the XCFramework and Swift consumer experiment"
+        type: choice
+        options: [packaging, probe, both]
+        default: packaging
 
 permissions:
   contents: read
@@ -29,6 +35,7 @@ env:
 
 jobs:
   probe:
+    if: inputs.jobs != 'packaging'
     # The standard Apple-silicon runner. Not a larger runner.
     runs-on: macos-15
     timeout-minutes: 60
@@ -230,3 +237,270 @@ jobs:
           # The run is red if any probed step failed, so that its status is
           # not mistaken for a pass. Read the lines above for which.
           if grep -q "=failure" summary.txt; then exit 1; fi
+
+  # EXPERIMENTAL. T11B readiness, experiment A: can the existing C interface
+  # be packaged as an XCFramework and consumed by a Swift test target that
+  # runs in an iOS Simulator.
+  #
+  # IT IS NOT ACCEPTANCE EVIDENCE FOR T11B. The consumer is a fixture, not
+  # the Swift adapter; no app is built or launched; nothing touches Core
+  # Location. Compiling, linking, running and being correct are reported as
+  # four separate things.
+  packaging:
+    if: inputs.jobs != 'probe'
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      # The baseline is pinned, so that a new runner image cannot change it
+      # silently. A missing version is a failure, not a fallback.
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      RUSTUP_TOOLCHAIN: "1.98.1"
+      SIM_DEVICE: iPhone 16 Pro
+      SIM_RUNTIME: com.apple.CoreSimulator.SimRuntime.iOS-18-6
+    steps:
+      - name: Fetch the commit (plain git; the repository is public)
+        id: fetch
+        run: |
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth 1 origin "${GITHUB_SHA}"
+          git checkout -q FETCH_HEAD
+          echo "commit: $(git rev-parse HEAD)"
+          echo "run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}"
+          echo "image: ${ImageOS:-unknown} version ${ImageVersion:-unknown}"
+          sw_vers
+          echo "untracked or generated files after checkout (none expected):"
+          git status --porcelain --ignored
+
+      - name: Pinned toolchain
+        id: toolchain
+        timeout-minutes: 10
+        run: |
+          xcodebuild -version
+          rustup toolchain install "${RUSTUP_TOOLCHAIN}" --profile minimal
+          rustup target add "${IOS_SIM_TARGET}"
+          rustc -vV
+          cargo -V
+          swift --version
+
+      - name: "Negative 1 - a clean checkout, before anything is generated, must not build"
+        id: negative_clean
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          test ! -e Apple/PackagingProbe/Artifacts
+          Scripts/apple/expect-build-failure.sh "clean checkout, nothing generated" "${RUNNER_TEMP}/derived"
+
+      - name: Build the static library and package the XCFramework
+        id: package
+        timeout-minutes: 20
+        run: Scripts/apple/build-xcframework.sh
+
+      - name: Symbols of the packaged library against the header, and what nm says
+        id: symbols
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          inspect() {
+            library="$1"
+            echo "=================== ${library}"
+            { nm -gU "${library}" 2>nm-errors.txt || echo "nm exit status: $?" >&2; } | awk '{print $NF}' | grep '^_locsim_' | sort -u > symbols.txt
+            echo "exported locsim symbols: $(wc -l < symbols.txt | tr -d ' ')   (the header declares $(wc -l < declared.txt | tr -d ' '))"
+            if diff declared.txt symbols.txt; then echo "symbols equal the declarations of the header"; else echo "SYMBOLS DIFFER FROM THE HEADER"; differs=1; fi
+            echo "-- nm wrote $(wc -l < nm-errors.txt | tr -d ' ') lines to standard error"
+            echo "-- its messages, by kind"
+            sed -E 's/^.*\): //' nm-errors.txt | sort | uniq -c
+            echo "-- the archive members they name, by crate"
+            sed -nE 's/^.*\.a\(([^)]*)\).*$/\1/p' nm-errors.txt | sed -E 's/-[0-9a-f]{16}\..*$//' | sort | uniq -c
+            echo "-- members of the crates of this project among them: $(grep -c 'locsim' nm-errors.txt || true)"
+            echo "-- the same listing with the bitcode reader of nm off (--no-llvm-bc)"
+            set +e
+            nm --no-llvm-bc -gU "${library}" > nm-nobc.txt 2> nm-nobc-errors.txt
+            echo "exit status $?; lines on standard error: $(wc -l < nm-nobc-errors.txt | tr -d ' ')"
+            head -3 nm-nobc-errors.txt
+            awk '{print $NF}' nm-nobc.txt | grep '^_locsim_' | sort -u | diff declared.txt - && echo "symbols equal the declarations of the header"
+            set -e
+            echo "-- one member nm complained about, as Mach-O"
+            rm -rf members && mkdir members
+            (
+              cd members
+              ar -x "${library}" 2>/dev/null || true
+              member="$(sed -nE 's/^.*\.a\(([^)]*)\).*$/\1/p' ../nm-errors.txt | head -1)"
+              if [ -n "${member}" ] && [ -f "${member}" ]; then
+                echo "member: ${member}"
+                file "${member}"
+                otool -l "${member}" | grep -E "segname|sectname" | paste - - | sort | uniq -c
+              else
+                echo "none to show"
+              fi
+              echo "-- build version of one member of locsim_ffi"
+              own="$(ls | grep -E '^locsim_ffi.*\.o$' | head -1)"
+              if [ -n "${own}" ]; then otool -l "${own}" | grep -A5 LC_BUILD_VERSION || echo "no LC_BUILD_VERSION"; fi
+            )
+          }
+          differs=0
+          grep -oE 'locsim_[a-z_]+\(' crates/locsim-ffi/include/locsim.h | tr -d '(' | sort -u | sed 's/^/_/' > declared.txt
+          inspect "$(find "${PWD}/Apple/PackagingProbe/Artifacts" -name liblocsim_ffi.a)"
+          echo "== for comparison, a debug build (what the toolchain probe built)"
+          cargo rustc -q -p locsim-ffi --target "${IOS_SIM_TARGET}" --crate-type staticlib
+          inspect "${PWD}/target/${IOS_SIM_TARGET}/debug/liblocsim_ffi.a"
+          exit "${differs}"
+
+      - name: Boot the baseline Simulator
+        id: boot
+        timeout-minutes: 15
+        run: |
+          xcrun simctl list devices available -j > devices.json
+          python3 - <<'PY' > udid.txt
+          import json, os, sys
+          devices = json.load(open("devices.json"))["devices"].get(os.environ["SIM_RUNTIME"], [])
+          found = [d["udid"] for d in devices if d.get("isAvailable") and d["name"] == os.environ["SIM_DEVICE"]]
+          if not found:
+              sys.exit("the baseline device is not on this runner")
+          print(found[0])
+          PY
+          udid="$(cat udid.txt)"
+          echo "SIM_UDID=${udid}" >> "${GITHUB_ENV}"
+          echo "device: ${SIM_DEVICE}   runtime: ${SIM_RUNTIME}   udid: ${udid}"
+          xcrun simctl boot "${udid}"
+          xcrun simctl bootstatus "${udid}" -b
+          echo "runtime version reported by the device: $(xcrun simctl getenv "${udid}" SIMULATOR_RUNTIME_VERSION)"
+
+      - name: "Stage 1 and 2 - compile the Swift consumer and link it with the packaged library"
+        id: build
+        timeout-minutes: 20
+        working-directory: Apple/PackagingProbe
+        run: |
+          xcodebuild -list
+          set +e
+          xcodebuild build-for-testing \
+            -scheme LocsimPackagingProbe \
+            -destination "platform=iOS Simulator,id=${SIM_UDID}" \
+            -derivedDataPath "${RUNNER_TEMP}/derived" > "${RUNNER_TEMP}/build.log" 2>&1
+          status=$?
+          set -e
+          echo "::group::the whole build log"
+          cat "${RUNNER_TEMP}/build.log"
+          echo "::endgroup::"
+          echo "== xcodebuild build-for-testing exit status ${status}"
+          echo "== Swift compile steps: $(grep -cE '^(SwiftCompile|SwiftDriver|CompileSwift)' "${RUNNER_TEMP}/build.log")"
+          echo "== link steps:"
+          grep -E '^Ld ' "${RUNNER_TEMP}/build.log" | cut -c1-300
+          echo "== how the link commands name the library:"
+          grep -E 'clang.*(locsim_ffi|LocsimFFI)' "${RUNNER_TEMP}/build.log" | grep -oE '(-l[A-Za-z_]*locsim[A-Za-z_]*|[^ ]*liblocsim_ffi\.a|-L[^ ]*LocsimFFI[^ ]*)' | sort | uniq -c
+          echo "== every warning and error, de-duplicated:"
+          grep -E '(warning|error):' "${RUNNER_TEMP}/build.log" | cut -c1-400 | sort | uniq -c || echo "none"
+          echo "== linker diagnostics: $(grep -cE '^ld: ' "${RUNNER_TEMP}/build.log")"
+          exit "${status}"
+
+      - name: "Stage 3 and 4 - run the tests in the Simulator, and what they assert"
+        id: test
+        timeout-minutes: 20
+        working-directory: Apple/PackagingProbe
+        run: |
+          set +e
+          xcodebuild test-without-building \
+            -scheme LocsimPackagingProbe \
+            -destination "platform=iOS Simulator,id=${SIM_UDID}" \
+            -derivedDataPath "${RUNNER_TEMP}/derived" > "${RUNNER_TEMP}/test.log" 2>&1
+          status=$?
+          set -e
+          echo "::group::the whole test log"
+          cat "${RUNNER_TEMP}/test.log"
+          echo "::endgroup::"
+          echo "== xcodebuild test-without-building exit status ${status}"
+          grep -E "Test Case .*(passed|failed)|Executed [0-9]+ tests|\*\* TEST" "${RUNNER_TEMP}/test.log" || true
+          echo "== where the tests say they ran:"
+          grep "LOCSIM-PROBE" "${RUNNER_TEMP}/test.log" || echo "the line was not found in the log (the tests still assert the environment)"
+          if [ "${status}" -eq 0 ] && ! grep -q "Executed 4 tests, with 0 failures" "${RUNNER_TEMP}/test.log"; then
+            echo "xcodebuild succeeded but four passing tests are not in the log"
+            exit 1
+          fi
+          exit "${status}"
+
+      - name: "Negative 2 - a damaged library must not build, with the earlier build products still present"
+        id: negative_damaged
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          library="$(find Apple/PackagingProbe/Artifacts -name liblocsim_ffi.a)"
+          printf 'this is not an archive\n' > "${library}"
+          ls -l "${library}"
+          Scripts/apple/expect-build-failure.sh "library replaced by 23 bytes of text" "${RUNNER_TEMP}/derived"
+
+      - name: "Negative 3 - a removed XCFramework must not build, with the earlier build products still present"
+        id: negative_removed
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          rm -rf Apple/PackagingProbe/Artifacts/LocsimFFI.xcframework
+          Scripts/apple/expect-build-failure.sh "XCFramework removed" "${RUNNER_TEMP}/derived"
+
+      - name: After regeneration the tests pass again
+        id: regenerated
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          Scripts/apple/build-xcframework.sh > "${RUNNER_TEMP}/repackage.log" 2>&1 || { cat "${RUNNER_TEMP}/repackage.log"; exit 1; }
+          tail -3 "${RUNNER_TEMP}/repackage.log"
+          cd Apple/PackagingProbe
+          set +e
+          xcodebuild test \
+            -scheme LocsimPackagingProbe \
+            -destination "platform=iOS Simulator,id=${SIM_UDID}" \
+            -derivedDataPath "${RUNNER_TEMP}/derived" > "${RUNNER_TEMP}/retest.log" 2>&1
+          status=$?
+          set -e
+          grep -E "Test Case .*(passed|failed)|Executed [0-9]+ tests|\*\* TEST|error:" "${RUNNER_TEMP}/retest.log" | cut -c1-300 || true
+          echo "== xcodebuild test exit status ${status}"
+          exit "${status}"
+
+      - name: Shut the Simulator down
+        if: always() && env.SIM_UDID != ''
+        continue-on-error: true
+        run: xcrun simctl shutdown "${SIM_UDID}"
+
+      - name: Summary
+        if: always()
+        env:
+          FETCH: ${{ steps.fetch.outcome }}
+          TOOLCHAIN: ${{ steps.toolchain.outcome }}
+          NEGATIVE_CLEAN: ${{ steps.negative_clean.outcome }}
+          PACKAGE: ${{ steps.package.outcome }}
+          SYMBOLS: ${{ steps.symbols.outcome }}
+          BOOT: ${{ steps.boot.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          NEGATIVE_DAMAGED: ${{ steps.negative_damaged.outcome }}
+          NEGATIVE_REMOVED: ${{ steps.negative_removed.outcome }}
+          REGENERATED: ${{ steps.regenerated.outcome }}
+        run: |
+          {
+            echo "PACKAGING SUMMARY (experimental; not acceptance evidence for T11B)"
+            echo "commit=${GITHUB_SHA}"
+            echo "image=${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            echo "pinned.xcode=${DEVELOPER_DIR}"
+            echo "pinned.rust=${RUSTUP_TOOLCHAIN}"
+            echo "pinned.simulator=${SIM_DEVICE} / ${SIM_RUNTIME}"
+            echo "step.fetch_commit=${FETCH}"
+            echo "step.pinned_toolchain=${TOOLCHAIN}"
+            echo "step.negative_clean_checkout_does_not_build=${NEGATIVE_CLEAN}"
+            echo "step.staticlib_and_xcframework=${PACKAGE}"
+            echo "step.symbols_equal_header=${SYMBOLS}"
+            echo "step.simulator_boot=${BOOT}"
+            echo "step.swift_compile_and_link=${BUILD}"
+            echo "step.tests_run_in_simulator_and_pass=${TEST}"
+            echo "step.negative_damaged_library_does_not_build=${NEGATIVE_DAMAGED}"
+            echo "step.negative_removed_xcframework_does_not_build=${NEGATIVE_REMOVED}"
+            echo "step.tests_pass_after_regeneration=${REGENERATED}"
+            echo "unverified=swift_adapter,app_build,app_launch,core_location,gpx,device_target,physical_device"
+          } | tee summary.txt
+          {
+            echo '```'
+            cat summary.txt
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if grep -qE "=(failure|skipped|cancelled)" summary.txt; then exit 1; fi
