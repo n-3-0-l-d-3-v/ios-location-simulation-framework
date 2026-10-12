@@ -34,6 +34,10 @@ rustc -vV
 xcodebuild -version
 
 echo "== build: locsim-ffi, staticlib, ${target}, ${profile}"
+# The panic contract of the C interface holds only for a library that
+# unwinds. This is what the target does unless a profile says otherwise.
+echo "panic strategy of the target: $(rustc --print cfg --target "${target}" | grep "^panic=")"
+grep -n "panic" Cargo.toml || echo "no panic setting in the workspace manifest"
 # The manifest is not changed: staticlib is a crate type it declares.
 # native-static-libs is what the final link must add; rustc prints it as a
 # note when it compiles.

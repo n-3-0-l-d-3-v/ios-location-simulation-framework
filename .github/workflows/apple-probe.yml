@@ -312,7 +312,7 @@ jobs:
             sed -E 's/^.*\): //' nm-errors.txt | sort | uniq -c
             echo "-- the archive members they name, by crate"
             sed -nE 's/^.*\.a\(([^)]*)\).*$/\1/p' nm-errors.txt | sed -E 's/-[0-9a-f]{16}\..*$//' | sort | uniq -c
-            echo "-- members of the crates of this project among them: $(grep -c 'locsim' nm-errors.txt || true)"
+            echo "-- members of the crates of this project among them: $(sed -nE 's/^.*\.a\(([^)]*)\).*$/\1/p' nm-errors.txt | grep -c '^locsim' || true)"
             echo "-- the same listing with the bitcode reader of nm off (--no-llvm-bc)"
             set +e
             nm --no-llvm-bc -gU "${library}" > nm-nobc.txt 2> nm-nobc-errors.txt
@@ -329,7 +329,8 @@ jobs:
               if [ -n "${member}" ] && [ -f "${member}" ]; then
                 echo "member: ${member}"
                 file "${member}"
-                otool -l "${member}" | grep -E "segname|sectname" | paste - - | sort | uniq -c
+                echo "its sections, as segment,section:"
+                otool -l "${member}" | awk '/sectname/ {section = $2} /segname/ {if (section != "") {print "  " $2 "," section; section = ""}}'
               else
                 echo "none to show"
               fi
