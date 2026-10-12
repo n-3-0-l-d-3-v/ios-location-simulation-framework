@@ -8,10 +8,22 @@
 //!
 //!     cargo run -p locsim-health --example gap_diagnostic -- \
 //!         Examples/Scenarios Docs/Diagnostics/long_gap
+//!
+//! Two things are compared, and they are not the same claim:
+//!
+//! - `summary.md`, the outcome of every case, on every host. It was the
+//!   same on Windows x86_64 and on macOS arm64.
+//! - `results.jsonl`, every number of every case, only on the kind of host
+//!   it was recorded on (Windows x86_64). On macOS arm64 the outcomes are
+//!   the same and numbers differ in their last digits (workflow run
+//!   38238724688), so the raw file is the recording of one platform.
 
 #[path = "../examples/gap_diagnostic.rs"]
 #[allow(dead_code)]
 mod diagnostic;
+
+/// Whether this host is the kind the raw recording was made on.
+const RECORDED_HERE: bool = cfg!(all(target_os = "windows", target_arch = "x86_64"));
 
 fn root() -> String {
     format!("{}/../..", env!("CARGO_MANIFEST_DIR"))
@@ -41,10 +53,19 @@ fn the_recording_is_what_a_fresh_run_writes() {
         "a case differed between two runs"
     );
 
-    let results = recorded("results.jsonl");
-    for (number, (old, new)) in results.lines().zip(fresh.results.lines()).enumerate() {
-        assert_eq!(old, new, "results.jsonl, line {}", number + 1);
+    // The outcome of every case, on every host. Compared line by line so
+    // that a failure names the scenario and placement.
+    let summary = recorded("summary.md");
+    for (old, new) in summary.lines().zip(fresh.summary.lines()) {
+        assert_eq!(old, new, "summary.md");
     }
+    assert_eq!(summary, fresh.summary);
+
+    let results = recorded("results.jsonl");
     assert_eq!(results.lines().count(), fresh.results.lines().count());
-    assert_eq!(recorded("summary.md"), fresh.summary);
+    if RECORDED_HERE {
+        for (number, (old, new)) in results.lines().zip(fresh.results.lines()).enumerate() {
+            assert_eq!(old, new, "results.jsonl, line {}", number + 1);
+        }
+    }
 }

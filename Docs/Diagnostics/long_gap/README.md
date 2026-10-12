@@ -16,10 +16,12 @@ Produced by `crates/locsim-health/examples/gap_diagnostic.rs`:
     cargo run -p locsim-health --example gap_diagnostic -- \
         Examples/Scenarios Docs/Diagnostics/long_gap
 
-`crates/locsim-health/tests/gap_recording.rs` compares the two written
-files with a fresh run, so a change to the engine that changes any recorded
-outcome fails `cargo test` until the files are regenerated. That test pins
-the recording. It does not say the recorded behaviour is right.
+`crates/locsim-health/tests/gap_recording.rs` compares the written files
+with a fresh run, so a change to the engine that changes any recorded
+outcome fails `cargo test` until the files are regenerated. `summary.md` is
+compared on every host; `results.jsonl` only on Windows x86_64, where it was
+recorded (see "Across platforms"). That test pins the recording. It does
+not say the recorded behaviour is right.
 
 ## What was run
 
@@ -64,8 +66,26 @@ Run on Windows 11 x86_64, rustc 1.98.1, on 2026-10-12.
 
 **Repeatability.** All 1056 cases gave the same record twice. This says the
 run is repeatable in one process on one machine. It does not say the
-outcomes are right, and it says nothing about another platform until the
-test has run there.
+outcomes are right.
+
+**Across platforms.** The diagnostic was also run on macOS 15.7 arm64 with
+the same rustc 1.98.1 (workflow run 38238724688, 2026-10-12) and compared
+with the Windows recording:
+
+- The outcome of every case is the same: `summary.md` is identical.
+- 723 of the 1056 records differ in the last digits of numbers. The
+  largest differences seen: latitude 8.9e-15 degrees and longitude 4.3e-14
+  degrees; speed 1.7e-9 m/s; course 1.5e-4 degrees, in samples whose speed
+  is close to zero. The numbers inside the recorded errors differ in the
+  same way (a change of speed of 1.0308955218472524 m/s on Windows is
+  1.0308955218446005 on macOS); the limits they are compared with do not.
+- So the engine's output is not bit-for-bit the same on these two hosts.
+  Why has not been investigated. The mathematics library of each platform
+  is a candidate and nothing more than that.
+
+A fixture that compares numbers exactly is therefore the fixture of one
+platform. The C harness's byte-for-byte comparison is made between two
+programs on the same machine and is not affected.
 
 **Late polling.** All 396 applicable `late_poll` cases returned a sample at
 the first poll after the gap and at the three after it, on both pipelines,
@@ -138,4 +158,5 @@ Not established:
 - That any fix is correct. None has been written.
 - Behaviour for pauses at other points of the interval, for pause lengths
   between those listed, or for a second pause in the same run.
-- Anything on a platform where the test has not run.
+- Anything on a platform other than the two above, and why those two
+  differ in their last digits.
