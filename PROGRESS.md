@@ -22,8 +22,9 @@ tooling.
 
 ## Status
 T00–T10 complete and tested on Windows. T11A is implemented and tested on
-Windows, from Rust and from a C program. No Apple code exists, and nothing
-has been built or run for any Apple platform.
+Windows, from Rust and from a C program. No Swift adapter and no app
+exist. On 2026-10-12 two readiness experiments ran on a hosted macOS
+runner (below); they are experiments, and T11B is not started.
 Repository: https://github.com/n-3-0-l-d-3-v/ios-location-simulation-framework
 
 ## Completed
@@ -69,6 +70,46 @@ Repository: https://github.com/n-3-0-l-d-3-v/ios-location-simulation-framework
 ## Current Work
 - None in flight. T11B has not been started or authorised.
 
+## Readiness experiments for T11B (2026-10-12)
+
+Two experiments the project owner authorised, and a proposal. **T11B is
+still not started and not authorised; none of this is acceptance evidence
+for it, and no row of `Docs/COMPATIBILITY.md` was changed.**
+
+- **Long-gap recording** (`Docs/Diagnostics/long_gap`,
+  `crates/locsim-health/examples/gap_diagnostic.rs`). 1056 cases: eight
+  scenarios, bare and supervised, a late poll or a pause and resume of 0 s
+  to 86400 s, at three places. Nothing in the engine changed.
+  - A late poll of any length gave a sample every time.
+  - The pause/resume defect reproduces in 17 cases on each pipeline:
+    `antimeridian_loop` for pauses of 1 to 30 s, `driving` mid-run for 1
+    and 2 s.
+  - New: in every moving scenario, with or without an error, the first
+    sample after a resume is one interval of movement stamped one interval
+    plus the pause later, so its reported speed collapses (`driving`, 5 s
+    pause: 24.4, then 2.3, then 26.9 m/s, all accepted).
+  - New: on macOS arm64 every outcome is the same as on Windows and the
+    numbers differ in their last digits. The engine is repeatable on a
+    host and not bit-for-bit the same across these two. Cause unknown.
+  - `tests/gap_recording.rs` pins the recording (outcomes on every host,
+    numbers on Windows x86_64).
+- **Apple packaging** (`Docs/Diagnostics/apple_packaging`,
+  `Scripts/apple/build-xcframework.sh`, `Apple/PackagingProbe`, workflow
+  job `packaging`). On a hosted macOS runner, Xcode 16.4, Rust 1.98.1,
+  iPhone 16 Pro Simulator on iOS 18.6: the static library for
+  `aarch64-apple-ios-sim` was packaged as an XCFramework with the
+  unmodified header, a Swift test target compiled against it, linked with
+  no linker diagnostic, and ran four tests in the Simulator (ABI version;
+  create and destroy a session; a refused document). A missing or damaged
+  artifact stops the build. The consumer is a fixture, not the adapter. No
+  sample was polled on iOS, no app exists, Core Location and GPX are
+  untouched.
+- **`nm`** exits 1 on the library: Xcode's LLVM cannot read the bitcode in
+  Rust's standard-library objects. With the bitcode reader off it reads
+  everything. A consumer built with link-time optimisation is untested.
+- **Proposal, not adopted:** `Docs/Proposals/IOS_COMPATIBILITY_POLICY.md`.
+  iPhone 16 on iOS 18.7.8 is in it as Untested.
+
 ## Latest closed work: T11A
 Closed on 2026-10-11. It delivered a fifth crate,
 `crates/locsim-ffi`, depending on the core, health and scenario crates and
@@ -111,9 +152,13 @@ same session. Unix-epoch times are not required; the core's `SystemClock`
 produces them by its own choice. (Contract C2.)
 
 ## Tests
-Last full run (2026-10-11, Windows 11, rustc 1.98.1, code as of commit
-`e7fad44`): **594 passed, 0 failed.** `cargo fmt --all -- --check` clean;
-`cargo clippy --all-targets --all-features -- -D warnings` clean.
+Last full run (2026-10-12, Windows 11, rustc 1.98.1, commit `6bcf2c2`):
+**595 passed, 0 failed** (the 594 of `e7fad44` and
+`locsim-health`'s `gap_recording`). `cargo fmt --all -- --check` clean;
+`cargo clippy --all-targets --all-features -- -D warnings` clean. The
+same 595 passed on macOS 15.7 arm64, rustc 1.98.1, in workflow run
+38239633331 at `72d4c7b`; that run is a probe, and the breakdown below is
+that of `e7fad44`.
 
 The C harness is a separate command, `crates/locsim-ffi/harness/run.sh`.
 Last run at `e7fad44`: exit 0 in all six configurations (MSVC against the
@@ -303,6 +348,10 @@ Findings during T10:
 
 ## Next
 - **Nothing is authorised to start.** T11A is closed; T11 stays open.
+- **Decisions waiting for the project owner** after the experiments of
+  2026-10-12: the ones listed at the end of
+  `Docs/Proposals/IOS_COMPATIBILITY_POLICY.md`, and what the engine
+  should do across a pause (`Docs/Diagnostics/long_gap/README.md`).
 - **T11B**, when the project owner authorises it and a Mac with Xcode is
   available. Before any implementation, the prerequisites listed with its
   acceptance criteria need explicit decisions. Agreed areas: build and
@@ -314,7 +363,8 @@ Findings during T10:
   (`Docs/PROJECT_CONTEXT/PROJECT_BRIEF.md`, "Acceptance criteria of T11B");
   its design is not written, and the decisions those criteria wait for
   have not been made. It cannot be done, or partly done, on the Windows machine used
-  so far.
+  so far; a hosted macOS runner has run the two experiments above and
+  nothing interactive.
 - **The pause/resume defect** needs a ticket of its own (see "Known
   Issues").
 - What T11B can build on: the header is the whole interface; a session is

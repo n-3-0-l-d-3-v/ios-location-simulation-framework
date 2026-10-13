@@ -83,8 +83,11 @@ been run on an iPhone, an iOS Simulator, or any Apple platform.**
   594 tests pass, `cargo fmt` and `cargo clippy -D warnings` are clean, and
   the C harness passes with MSVC and with MinGW gcc. The harness is a
   separate command; `cargo test` does not run it.
-- There is no Apple code of any kind: no Swift, no app. Nothing has been
-  built or run on any system but one Windows machine.
+- There is no Swift adapter and no app. Beyond one Windows machine, the
+  only runs are two experiments of 2026-10-12 on a hosted macOS runner
+  (`Docs/Diagnostics`): a recording of the engine after gaps in time,
+  and a packaging fixture that ran four calls in an iOS 18.6 Simulator.
+  A compatibility policy is proposed, not adopted, in `Docs/Proposals`.
 - A stored or failed simulation cannot be resumed, only started again.
   There is no timer or real-time driver: everything is polled. One core
   defect is open (a sample after a pause and resume can be rejected).

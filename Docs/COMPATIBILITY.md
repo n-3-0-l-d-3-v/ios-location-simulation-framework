@@ -89,7 +89,13 @@ The store is not reachable through the C interface.
 
 ## Delivery on Apple platforms
 
-Nothing Apple exists yet. The C interface above is what an adapter would
+**Note of 2026-10-12.** Two readiness experiments ran on a hosted macOS
+runner and are recorded in `Docs/Diagnostics`. They are not runs of an
+adapter, and no row of this document was changed for them. Whether and
+how they enter this document is a decision asked for in
+`Docs/Proposals/IOS_COMPATIBILITY_POLICY.md`.
+
+No adapter exists yet. The C interface above is what an adapter would
 call; an adapter is ticket T11B, which has not started and needs a Mac with
 Xcode. **Every row is Untested, and a row may change only on a run with
 Apple tooling on that combination.** A passing C harness on Windows is not

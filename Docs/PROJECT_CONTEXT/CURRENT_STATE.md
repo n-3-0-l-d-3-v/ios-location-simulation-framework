@@ -4,6 +4,9 @@
 > last rewritten on 2026-10-11, in the documentation stage of T11A, and
 > updated the same day when T11A was closed. It describes code commit
 > `e7fad44` plus documentation commits. Run the checklist at the bottom first.
+> **Added on 2026-10-12:** two readiness experiments and a proposal; see
+> "Readiness experiments" below. Lines they made untrue were corrected;
+> the rest of this file is as it was.
 > Whenever this file and the repository disagree, the repository is right
 > and this file needs fixing.
 
@@ -17,7 +20,7 @@
 | Last commit that added code | `e7fad44` — the C header, the C harness, a reference example and a header test; no library source changed | `git show --stat e7fad44` |
 | Later commits | Documentation; one of them also rewords two doc comments (`Timestamp` in the core, the module doc of `locsim-ffi`) | `git log e7fad44..HEAD --stat` |
 | Toolchain | rustc 1.98.1, Windows 11 x86_64, target `x86_64-pc-windows-msvc` | `rustc -vV` |
-| `cargo test` | 594 passed, 0 failed | run on 2026-10-11 |
+| `cargo test` | 595 passed, 0 failed (594 at `e7fad44`, and `gap_recording`) | run on 2026-10-12 at `6bcf2c2`; the breakdown below is that of `e7fad44` |
 | `cargo fmt --all -- --check` | clean | same run |
 | `cargo clippy --all-targets --all-features -- -D warnings` | clean | same run |
 | C harness, `crates/locsim-ffi/harness/run.sh` | exit 0: six configurations, about 385 000 checks each, none failed | run at `e7fad44`; **not part of `cargo test`** |
@@ -108,8 +111,10 @@ crates and by the C harness.
 
 ## What does not exist
 
-- Any Apple code: no Swift, no `CLLocation` conversion, no Xcode project, no
-  app. Nothing has been built for an Apple target.
+- The Apple side: no Swift adapter, no `CLLocation` conversion, no Xcode
+  project, no app. What exists is an experiment: a script that packages
+  the library as an XCFramework and a Swift fixture with four tests
+  (`Apple/`, `Scripts/apple/`).
 - **A timer, thread or real-time driver.** A session is polled.
   `locsim_session_next_deadline` says when to call next; nothing calls. A
   stall is noticed only when something calls `check` or `poll`.
@@ -123,14 +128,24 @@ crates and by the C harness.
 - `TestProvider`, `DevelopmentAdapter`, `CoreLocationAdapter`.
 - GPX import or export.
 - `Docs/TESTING.md`, `Docs/RELIABILITY.md`.
-- CI. Tests and the C harness have only ever been run by hand on one machine.
+- CI on push. One workflow exists, `apple-probe.yml`, started by hand: a
+  toolchain probe and the packaging experiment, on a hosted macOS runner.
+  The C harness has only ever been run by hand on one Windows machine.
 
 ## What has never been verified
 
-- Anything on an iOS Simulator, an iPhone, or a jailbroken device.
-- A build of any crate on macOS or Linux, including the Unix-only code and
-  tests of `locsim-store`.
-- A cross-compile for `aarch64-apple-ios`, even a compile check.
+- Anything on an iPhone or a jailbroken device. In an iOS Simulator: only
+  the four calls of the packaging fixture (iPhone 16 Pro, iOS 18.6); no
+  sample has been polled there.
+- A build of any crate on Linux. On macOS arm64 the workspace tests ran
+  in a hosted probe (595 passed, run 38239633331), which is the first
+  time the Unix-only code and tests of `locsim-store` were compiled and
+  run; nobody has read that run for what those three tests cover.
+- A build for a device, `aarch64-apple-ios`, even a compile check. Only
+  `aarch64-apple-ios-sim` has been built.
+- That the engine gives the same numbers on two platforms. It does not:
+  Windows x86_64 and macOS arm64 agree on every outcome of the long-gap
+  recording and differ in the last digits of numbers. Cause unknown.
 - The header compiled as C++, or by any compiler other than MSVC 19.44 and
   MinGW-w64 gcc 14.2; any 32-bit build.
 - `locsim-ffi` built by the Rust GNU toolchain. (A C caller compiled by
@@ -152,7 +167,9 @@ The living list is the "Known Issues / Limitations" section of
 
 - **Open core defect: after a pause and a resume, the next sample of some
   scenarios is rejected by the gate.** Not fixed, and outside T11A. See
-  `PROGRESS.md`.
+  `PROGRESS.md`. Recorded over eleven pause lengths in
+  `Docs/Diagnostics/long_gap`, which also shows that the pauses that are
+  not rejected still emit one sample with a collapsed speed.
 - Recovery is a new run from the scenario's beginning: a position jump, a
   first sample without speed, a new run number.
 - Nothing calls `check`; whoever integrates a session must.
@@ -179,6 +196,20 @@ The living list is the "Known Issues / Limitations" section of
 - **The gate is strict by design.** The temptation to loosen it is the risk;
   the open pause/resume defect is where that temptation now sits.
 - **Single maintainer context.** This directory is the mitigation.
+
+## Readiness experiments (2026-10-12)
+
+Authorised as experiments only. T11B is not started, its acceptance
+criteria are unchanged, and `Docs/COMPATIBILITY.md` has no changed row.
+
+| What | Where | Result |
+|---|---|---|
+| Long-gap recording of the engine | `Docs/Diagnostics/long_gap` | Late polls never fail; the pause/resume defect reproduces; outcomes equal on Windows and macOS, numbers not |
+| XCFramework packaging and a Swift consumer fixture | `Docs/Diagnostics/apple_packaging` | Compiled, linked and ran four tests in the iOS 18.6 Simulator; a missing or damaged artifact stops the build |
+| Proposed compatibility policy and matrix | `Docs/Proposals/IOS_COMPATIBILITY_POLICY.md` | For review; not adopted |
+
+Workflow runs: 38237842696 (packaging, `e5e3100`), 38239633331 (probe,
+`72d4c7b`). Read their logs before relying on a line above.
 
 ## The decisions T11 had to make, and where they stand
 
@@ -237,9 +268,9 @@ implementation. T11B is not authorised to start.
 
 **What the current machine can and cannot do.** It is Windows with Rust,
 MSVC and MinGW gcc, and no Swift toolchain. No part of T11B can be run on
-it. `cargo check --target aarch64-apple-ios` might be possible after
-`rustup target add`; it has not been tried, and a check is not a link and
-not a run.
+it. What has been used instead is a hosted macOS runner, through the
+workflow, started by hand: it can build, link and run tests in a
+Simulator, and it cannot do anything interactive or reach a device.
 
 T11 is not allowed to: put simulation mathematics on the platform side;
 conceal the framework or a jailbreak, bypass integrity checks, evade
