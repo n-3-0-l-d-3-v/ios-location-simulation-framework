@@ -138,9 +138,11 @@ crates and by the C harness.
   the four calls of the packaging fixture (iPhone 16 Pro, iOS 18.6); no
   sample has been polled there.
 - A build of any crate on Linux. On macOS arm64 the workspace tests ran
-  in a hosted probe (595 passed, run 38239633331), which is the first
-  time the Unix-only code and tests of `locsim-store` were compiled and
-  run; nobody has read that run for what those three tests cover.
+  in hosted probes (594 passed on 2026-10-11, run 38146390984; 595 on
+  2026-10-12, run 38239633331). The `platform` suite of `locsim-store`
+  ran 4 tests there, so its Unix-only tests were compiled and run; what
+  they establish about the store on a Unix-like system has not been
+  reviewed.
 - A build for a device, `aarch64-apple-ios`, even a compile check. Only
   `aarch64-apple-ios-sim` has been built.
 - That the engine gives the same numbers on two platforms. It does not:
